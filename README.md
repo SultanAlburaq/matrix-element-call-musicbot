@@ -42,6 +42,21 @@ Pull requests are appreciated. If you want to help, open a PR.
 
 - `contact@alburaqsultan.com`
 
+## Demo
+
+<p align="center">
+  <img src="assets/play.gif" width="700"/>
+</p>
+
+<p align="center">
+  <img src="assets/commands.gif" width="700"/>
+</p>
+
+<p align="center">
+  <img src="assets/customplaylists.gif" width="700"/>
+</p>
+
+
 ## Commands
 
 ### Playback
