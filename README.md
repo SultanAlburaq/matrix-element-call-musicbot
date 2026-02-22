@@ -18,6 +18,11 @@ Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`
 > This bot does **not support encrypted calls yet**.
 > If your room/call requires end-to-end encrypted call media, playback will not work yet.
 
+> [!WARNING]
+> This bot REQUIRES atleast PL50 [ Moderator Level ] to function.
+> Honestly this is the main reason why I haven't made a inviteable discord like bot. Looking on how to fix this!
+
+
 ## Current Limitations
 
 - No encrypted call media support yet
