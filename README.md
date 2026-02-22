@@ -23,7 +23,7 @@ Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`
 - No encrypted call media support yet
 - Single active playback session at a time (no sharding/multi-room playback yet)
 
-## Roadmap (From Me)
+## Roadmap (Not Concrete)
 
 - Public hosted bot for other communities
 - Add encrypted call support
