@@ -57,6 +57,7 @@ Long-term fix:
 - Public hosted bot for other communities
 - Add encrypted call support
 - Add sharding/multi-room playback support so music can run in multiple rooms at once
+- Playlist support
 
 ## Contributing
 
@@ -117,7 +118,7 @@ Pull requests are appreciated. If you want to help, open a PR.
 
 ## Docker (Prebuilt Image, Recommended)
 
-Use this when you publish an image (for example on GHCR or Docker Hub). Users only need a config file and one command.
+Use this for prebuilt images. 
 
 ### Linux
 
