@@ -74,7 +74,7 @@ docker compose up -d
 
 ## Docker (Build It Yourself From Release)
 
-Use this when users download source release archives and build locally.
+Use this when you want to download source release archives and build locally.
 
 ### Linux
 
