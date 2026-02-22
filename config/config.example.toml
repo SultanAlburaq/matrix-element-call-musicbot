@@ -1,0 +1,58 @@
+# Copy to config/config.toml
+
+# ==============================
+# HARD REQUIREMENT TO RUN
+# ==============================
+[matrix]
+homeserver = "https://matrix.example.org"
+user_id = "@musicbot:example.org"
+access_token = "YOUR_MATRIX_ACCESS_TOKEN"
+
+
+# ==============================
+# OPTIONAL SETTINGS
+# ==============================
+[bot]
+name = "Music Bot"
+history_limit = 10
+auto_accept_invites = false
+
+[paths]
+audio_dir = "/tmp/musicbot_audio"
+saved_queues_file = "data/saved_queues.json"
+
+[audio]
+# Cache modes:
+# - always_delete: no persistent cache, files removed after playback/on shutdown
+# - never_delete: keep all downloaded files
+# - size_lru: keep cache up to cache_max_bytes, evict oldest when over limit
+cache_mode = "size_lru" # always_delete | never_delete | size_lru
+cache_max_bytes = 1073741824 # 1GB default, minimum 200MB in size_lru
+cache_delete_after_playback = false
+cache_delete_on_shutdown = true
+
+auto_advance_buffer = 2.0
+preroll_silence = 1.0
+normalize_audio = false
+fade_in_ms = 120
+volume_percent = 100 # 0-200
+
+[worker]
+max_restart_attempts = 3
+heartbeat_interval_seconds = 10.0
+skip_cooldown_seconds = 1.0
+stop_timeout_restart_threshold = 2
+log_max_bytes = 2000000
+log_backups = 5
+
+[logging]
+file = "logs/musicbot.log"
+clean_enabled = true
+clean_file = "logs/musicbot.clean.log"
+clean_filter_matrixrtc_noise = true
+max_bytes = 2000000
+backups = 5
+
+[ui]
+show_progress_messages = false
+rich_formatting = false

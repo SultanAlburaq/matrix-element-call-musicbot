@@ -1,0 +1,17 @@
+services:
+  musicbot:
+    build: .
+    container_name: musicbot
+    restart: unless-stopped
+    environment:
+      - CONFIG_FILE=/app/config/config.toml
+    volumes:
+      - ./config:/app/config:ro
+      - musicbot_logs:/app/logs
+      - musicbot_data:/app/data
+      - musicbot_cache:/tmp/musicbot_audio
+
+volumes:
+  musicbot_logs:
+  musicbot_data:
+  musicbot_cache:

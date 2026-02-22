@@ -1,0 +1,16 @@
+.env
+config.toml
+config/*
+!config/.gitkeep
+!config/config.example.toml
+logs/
+data/
+__pycache__/
+*.pyc
+call_worker/call_worker.log
+call_worker/call_worker.log.*
+venv/
+call_worker/node_modules/
+call_worker/.matrix-localstorage.json
+call_worker.log
+call_worker.log.*

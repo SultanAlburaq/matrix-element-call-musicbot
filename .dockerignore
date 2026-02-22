@@ -1,0 +1,15 @@
+venv/
+__pycache__/
+*.pyc
+logs/
+data/
+cache/
+config/*
+!config/.gitkeep
+!config/config.example.toml
+call_worker/node_modules/
+call_worker/call_worker.log*
+call_worker.log*
+config.toml
+.env
+.git/
