@@ -2,6 +2,75 @@
 
 Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`, etc.) plus real playback in Element Call.
 
+## Features
+
+- Discord-style chat command workflow in Matrix rooms
+- Joins Element Call and plays audio directly in call
+- URL or search-based playback with queue and ETA
+- Saved queue presets (`save`, `load`, `rename`, `delete`)
+- Playback history and now-playing visibility
+- Audio controls (volume, fade-in, normalization)
+- Built-in diagnostics and runtime status commands
+
+## Important
+
+> [!WARNING]
+> This bot does **not support encrypted calls yet**.
+> If your room/call requires end-to-end encrypted call media, playback will not work yet.
+
+## Current Limitations
+
+- No encrypted call media support yet
+- Single active playback session at a time (no sharding/multi-room playback yet)
+
+## Roadmap (From Me)
+
+- Public hosted bot for other communities
+- Add encrypted call support
+- Add sharding/multi-room playback support so music can run in multiple rooms at once
+
+## Contributing
+
+Pull requests are appreciated. If you want to help, open a PR.
+
+## Contact
+
+- `contact@alburaqsultan.com`
+
+## Commands
+
+### Playback
+
+- `!help` (`!h`) - show this help
+- `!join` (`!j`) - join Element Call in this room
+- `!leave` (`!lv`) - leave current Element Call
+- `!play` (`!p`) `<url-or-query>` - add track and auto-join call if needed
+- `!queue` (`!q`) - show queue with ETA
+- `!nowplaying` (`!np`) - show current track
+- `!skip` (`!s`) - skip current track
+- `!stop` (`!x`) - stop playback and clear queue
+- `!loop` (`!lp`) - toggle loop mode
+- `!history` (`!hist`) - show recent playback history
+
+### Saved Queues
+
+- `!save` (`!sv`) `<name> [--force]` - save current+upcoming queue
+- `!load` (`!ld`) `<name>` - load a saved queue
+- `!queues` (`!qs`) - list saved queues
+- `!deletequeue` (`!dq`) `<name>` - delete a saved queue
+- `!renamequeue` (`!rq`) `<old> <new>` - rename a saved queue
+
+### Audio & Info
+
+- `!audio` (`!a`) - show current audio settings
+- `!normalize` (`!norm`) `on|off` - toggle normalization
+- `!fadein` (`!fi`) `<ms>` - set fade-in (`0-5000`)
+- `!volume` (`!v`) `<0-200>` - set playback volume percent
+- `!status` (`!st`) - show bot status
+- `!diag` (`!d`) - show diagnostics
+- `!config` (`!cfg`) - show active config
+- `!defaults` (`!df`) - show default config values
+
 ## Docker (Prebuilt Image, Recommended)
 
 Use this when you publish an image (for example on GHCR or Docker Hub). Users only need a config file and one command.
