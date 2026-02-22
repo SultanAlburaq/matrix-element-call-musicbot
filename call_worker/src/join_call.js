@@ -29,7 +29,7 @@ const SAMPLES_PER_FRAME = (SAMPLE_RATE * FRAME_MS) / 1000;
 const FRAME_BYTES = SAMPLES_PER_FRAME * CHANNELS * 2;
 
 const REQUIRED_ENV = ["MATRIX_HOMESERVER", "MATRIX_USER_ID", "MATRIX_ACCESS_TOKEN"];
-const MEMBERSHIP_MODE = "legacy";
+const MEMBERSHIP_MODES = new Set(["matrix2_auto", "matrix2", "legacy"]);
 const STALL_TIMEOUT_MS = 10_000;
 const STOP_GRACE_MS = 300;
 const STOP_HARD_TIMEOUT_MS = 1200;
@@ -62,6 +62,48 @@ function parseNonNegativeIntEnv(name, defaultValue) {
     const parsed = Number.parseInt(raw, 10);
     if (!Number.isFinite(parsed) || parsed < 0) return defaultValue;
     return parsed;
+}
+
+function parseMembershipModeEnv() {
+    const raw = process.env.WORKER_MEMBERSHIP_MODE;
+    if (!raw) return "legacy";
+
+    const normalized = String(raw).trim().toLowerCase();
+    if (normalized === "auto") {
+        return "matrix2_auto";
+    }
+    if (MEMBERSHIP_MODES.has(normalized)) {
+        return normalized;
+    }
+    return "legacy";
+}
+
+function useStickyMembershipEvents(membershipMode) {
+    return membershipMode !== "legacy";
+}
+
+function shouldFallbackToLegacyAuth(error) {
+    const status = error && typeof error.status === "number" ? error.status : null;
+    return status === 404 || status === 405 || status === 501;
+}
+
+function shouldFallbackStickyJoin(mode, error) {
+    if (mode === "legacy") return false;
+    const message = error instanceof Error ? error.message : String(error || "");
+    const normalized = message.toLowerCase();
+    return normalized.includes("unsupportedstickyeventsendpointerror") || normalized.includes("sticky events");
+}
+
+function joinRtcSessionWithMode(session, { userId, deviceId, memberId }, livekitTransport, membershipMode) {
+    session.joinRTCSession(
+        { userId, deviceId, memberId },
+        [livekitTransport],
+        livekitTransport,
+        {
+            callIntent: "audio",
+            unstableSendStickyEvents: useStickyMembershipEvents(membershipMode),
+        },
+    );
 }
 
 const audioSettings = {
@@ -295,10 +337,10 @@ async function postJson(url, body) {
     }
 }
 
-async function getLivekitConfig(client, livekitServiceUrl, roomId, membership) {
+async function getLivekitConfig(client, livekitServiceUrl, roomId, membership, membershipMode) {
     const openid = await client.getOpenIdToken();
 
-    if (MEMBERSHIP_MODE === "legacy") {
+    if (membershipMode === "legacy") {
         logLine("livekit auth using legacy endpoint /sfu/get");
         const cfg = await postJson(`${livekitServiceUrl}/sfu/get`, {
             room: roomId,
@@ -324,7 +366,11 @@ async function getLivekitConfig(client, livekitServiceUrl, roomId, membership) {
         cfg._auth_mode = "matrix2_get_token";
         return cfg;
     } catch (error) {
-        if (error && error.status === 404) {
+        if (membershipMode === "matrix2") {
+            throw error;
+        }
+
+        if (shouldFallbackToLegacyAuth(error)) {
             logLine("matrix2 endpoint unavailable, fallback to /sfu/get");
             const cfg = await postJson(`${livekitServiceUrl}/sfu/get`, {
                 room: roomId,
@@ -339,13 +385,14 @@ async function getLivekitConfig(client, livekitServiceUrl, roomId, membership) {
 }
 
 class CallWorker {
-    constructor({ matrixClient, rtcSession, livekitServiceUrl, roomId, userId, deviceId }) {
+    constructor({ matrixClient, rtcSession, livekitServiceUrl, roomId, userId, deviceId, membershipMode }) {
         this.matrixClient = matrixClient;
         this.rtcSession = rtcSession;
         this.livekitServiceUrl = livekitServiceUrl;
         this.roomId = roomId;
         this.userId = userId;
         this.deviceId = deviceId;
+        this.membershipMode = membershipMode;
 
         this.livekitRoom = null;
         this.audioSource = null;
@@ -420,7 +467,13 @@ class CallWorker {
             deviceId: this.deviceId,
             memberId: `${this.userId}:${this.deviceId}`,
         };
-        const config = await getLivekitConfig(this.matrixClient, this.livekitServiceUrl, this.roomId, membership);
+        const config = await getLivekitConfig(
+            this.matrixClient,
+            this.livekitServiceUrl,
+            this.roomId,
+            membership,
+            this.membershipMode,
+        );
         if (!config || !config.url || !config.jwt) {
             throw new Error("Invalid LiveKit config returned by authorization service");
         }
@@ -716,6 +769,7 @@ async function main() {
     const homeserver = process.env.MATRIX_HOMESERVER;
     const userId = process.env.MATRIX_USER_ID;
     const accessToken = process.env.MATRIX_ACCESS_TOKEN;
+    const membershipMode = parseMembershipModeEnv();
 
     const whoami = await fetchWhoAmI(homeserver, accessToken);
     const deviceId = process.env.MATRIX_DEVICE_ID || whoami.device_id;
@@ -731,7 +785,7 @@ async function main() {
     logLine(
         `audio settings normalize=${audioSettings.normalizeAudio} fade_in_ms=${audioSettings.fadeInMs} volume_percent=${audioSettings.volumePercent}`,
     );
-    logLine(`worker start room=${roomId} membership_mode=${MEMBERSHIP_MODE}`);
+    logLine(`worker start room=${roomId} membership_mode=${membershipMode}`);
 
     const client = createClient({
         baseUrl: homeserver,
@@ -751,8 +805,14 @@ async function main() {
     sessionManager.start();
 
     const session = sessionManager.getRoomSession(room);
+
+    let effectiveMembershipMode = membershipMode;
     session.on(MatrixRTCSessionEvent.MembershipManagerError, (error) => {
         const message = error instanceof Error ? error.message : String(error);
+        if (shouldFallbackStickyJoin(effectiveMembershipMode, message)) {
+            logLine(`membership manager reported sticky-events incompatibility: ${message}`);
+            return;
+        }
         emit({ event: "error", message: `Membership manager error: ${message}` });
     });
 
@@ -762,15 +822,31 @@ async function main() {
         livekit_service_url: livekitServiceUrl,
     };
 
-    session.joinRTCSession(
-        { userId, deviceId, memberId },
-        [livekitTransport],
-        livekitTransport,
-        { callIntent: "audio", unstableSendStickyEvents: MEMBERSHIP_MODE !== "legacy" },
-    );
+    joinRtcSessionWithMode(session, { userId, deviceId, memberId }, livekitTransport, effectiveMembershipMode);
 
-    await waitForJoinState(session, 20_000);
-    await waitForJoinOutcome(session, userId, deviceId, 20_000);
+    try {
+        await waitForJoinState(session, 20_000);
+        await waitForJoinOutcome(session, userId, deviceId, 20_000);
+    } catch (error) {
+        if (!shouldFallbackStickyJoin(effectiveMembershipMode, error)) {
+            throw error;
+        }
+
+        const notice = "Server lacks sticky events; fell back to legacy compatibility mode. Require PL50 (Moderator).";
+        emit({ event: "compatibility_notice", roomId, message: notice });
+        logLine(notice);
+
+        try {
+            await session.leaveRoomSession(5_000);
+        } catch {
+            // best effort cleanup before retry
+        }
+
+        effectiveMembershipMode = "legacy";
+        joinRtcSessionWithMode(session, { userId, deviceId, memberId }, livekitTransport, effectiveMembershipMode);
+        await waitForJoinState(session, 20_000);
+        await waitForJoinOutcome(session, userId, deviceId, 20_000);
+    }
 
     const worker = new CallWorker({
         matrixClient: client,
@@ -779,10 +855,11 @@ async function main() {
         roomId,
         userId,
         deviceId,
+        membershipMode: effectiveMembershipMode,
     });
 
     await worker.connectLivekit();
-    emit({ event: "joined", roomId, mode: MEMBERSHIP_MODE });
+    emit({ event: "joined", roomId, mode: effectiveMembershipMode });
 
     const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
 

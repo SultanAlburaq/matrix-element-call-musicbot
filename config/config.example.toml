@@ -42,6 +42,7 @@ max_restart_attempts = 3
 heartbeat_interval_seconds = 10.0
 skip_cooldown_seconds = 1.0
 stop_timeout_restart_threshold = 2
+membership_mode = "legacy" # legacy | matrix2_auto | matrix2
 log_max_bytes = 2000000
 log_backups = 5
 

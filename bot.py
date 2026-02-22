@@ -68,6 +68,7 @@ class IntegratedBot:
                 "VOLUME_PERCENT": str(config.VOLUME_PERCENT),
                 "WORKER_LOG_MAX_BYTES": str(config.WORKER_LOG_MAX_BYTES),
                 "WORKER_LOG_BACKUPS": str(config.WORKER_LOG_BACKUPS),
+                "WORKER_MEMBERSHIP_MODE": config.WORKER_MEMBERSHIP_MODE,
             },
         )
         self.call_worker.set_event_handler(self._on_call_worker_event)
@@ -244,6 +245,7 @@ class IntegratedBot:
             f"Worker restarts: {self.config.WORKER_MAX_RESTART_ATTEMPTS}",
             f"Worker heartbeat: {self.config.WORKER_HEARTBEAT_INTERVAL:.1f}s",
             f"Stop-timeout recovery: {self.config.WORKER_STOP_TIMEOUT_RESTART_THRESHOLD}",
+            f"Worker membership mode: {self.config.WORKER_MEMBERSHIP_MODE}",
             f"History limit: {self.config.HISTORY_LIMIT}",
             f"Auto-accept invites: {'On' if self.config.AUTO_ACCEPT_INVITES else 'Off'}",
             f"Progress messages: {'On' if self.config.SHOW_PROGRESS_MESSAGES else 'Off'}",
@@ -481,8 +483,14 @@ class IntegratedBot:
 
     async def _on_call_worker_event(self, event: dict):
         event_name = event.get("event")
-        room_id = self._current_room_id
+        room_id = event.get("roomId") or self._current_room_id or self.call_worker.room_id or self.call_worker.desired_room_id
         if not room_id:
+            return
+
+        if event_name == "compatibility_notice":
+            message = event.get("message")
+            if isinstance(message, str) and message:
+                await self.send_message(room_id, f"ℹ️ {message}")
             return
 
         if event_name == "worker_restart_attempt":

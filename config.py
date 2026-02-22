@@ -29,6 +29,7 @@ class Config:
         "worker.heartbeat_interval_seconds": 10.0,
         "worker.skip_cooldown_seconds": 1.0,
         "worker.stop_timeout_restart_threshold": 2,
+        "worker.membership_mode": "legacy",
         "worker.log_max_bytes": 2_000_000,
         "worker.log_backups": 5,
         "logging.file": "logs/musicbot.log",
@@ -161,6 +162,20 @@ class Config:
             "stop_timeout_restart_threshold",
             self.DEFAULTS["worker.stop_timeout_restart_threshold"],
         )
+        self.WORKER_MEMBERSHIP_MODE = (
+            self._get_str(
+                "WORKER_MEMBERSHIP_MODE",
+                "worker",
+                "membership_mode",
+                default=self.DEFAULTS["worker.membership_mode"],
+            )
+            or self.DEFAULTS["worker.membership_mode"]
+        )
+        self.WORKER_MEMBERSHIP_MODE = self.WORKER_MEMBERSHIP_MODE.strip().lower()
+        if self.WORKER_MEMBERSHIP_MODE not in {"matrix2_auto", "matrix2", "legacy"}:
+            raise ValueError(
+                "WORKER_MEMBERSHIP_MODE/worker.membership_mode must be one of: matrix2_auto, matrix2, legacy"
+            )
 
         missing = [
             key
@@ -299,6 +314,7 @@ class Config:
             f"worker.heartbeat_interval_seconds = {cls.DEFAULTS['worker.heartbeat_interval_seconds']}",
             f"worker.skip_cooldown_seconds = {cls.DEFAULTS['worker.skip_cooldown_seconds']}",
             f"worker.stop_timeout_restart_threshold = {cls.DEFAULTS['worker.stop_timeout_restart_threshold']}",
+            "worker.membership_mode = matrix2_auto | matrix2 | legacy",
             f"worker.log_max_bytes = {cls.DEFAULTS['worker.log_max_bytes']}",
             f"worker.log_backups = {cls.DEFAULTS['worker.log_backups']}",
             f"logging.file = {cls.DEFAULTS['logging.file']}",

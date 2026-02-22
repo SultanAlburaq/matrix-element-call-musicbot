@@ -28,6 +28,35 @@ Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`
 - No encrypted call media support yet
 - Single active playback session at a time (no sharding/multi-room playback yet)
 
+## Troubleshooting
+
+### `UnsupportedStickyEventsEndpointError` when joining call
+
+If you see:
+
+- `Membership manager error: ... UnsupportedStickyEventsEndpointError: Server does not support the sticky events`
+
+your homeserver does not support sticky events yet. The worker will fall back and post:
+
+- `Server lacks sticky events; fell back to legacy compatibility mode. Require PL50 (Moderator).`
+
+What this means:
+
+- PL50 is not always required.
+- If your homeserver supports sticky events (`matrix2`/`matrix2_auto`), PL50 is typically not needed.
+- On legacy mode, normal rooms may require PL50, while Video rooms can work without PL50.
+
+How to force compatibility mode manually:
+
+```toml
+[worker]
+membership_mode = "legacy"
+```
+
+Long-term fix:
+
+- Upgrade your homeserver/call stack to support MatrixRTC sticky events, then use `matrix2_auto`.
+
 ## Roadmap (Not Concrete)
 
 - Public hosted bot for other communities
