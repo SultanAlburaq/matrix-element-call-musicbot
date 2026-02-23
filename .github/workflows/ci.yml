@@ -1,0 +1,103 @@
+name: CI + Docker
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  checks:
+    name: Checks (deps + offline sanity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Offline Python sanity: compile all .py files (catches syntax errors)
+      - name: Python sanity (syntax compile)
+        run: |
+          python -m compileall -q .
+
+      # Optional but useful: ensure pip didn't leave dependency resolution in a broken state
+      - name: Python sanity (pip check)
+        run: |
+          pip check
+
+      # Node (call_worker)
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: call_worker/package-lock.json
+
+      - name: Install Node deps (call_worker)
+        run: npm ci --prefix call_worker
+
+      # Offline Node sanity: syntax-check JS files without running them
+      # (node --check parses the file and exits)
+      - name: Node sanity (parse JS in call_worker)
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          files=(call_worker/**/*.js call_worker/**/*.cjs call_worker/**/*.mjs)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No JS files found under call_worker/; skipping."
+            exit 0
+          fi
+
+          failed=0
+          for f in "${files[@]}"; do
+            echo "Checking $f"
+            node --check "$f" || failed=1
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo "One or more JS files failed syntax check."
+            exit 1
+          fi
+
+  docker:
+    name: Docker (build + push)
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase owner
+        id: lc
+        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Login to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Always build (including PRs) to catch Dockerfile/build breakage,
+      # but only push on non-PR events.
+      - name: Build (and push on non-PR)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ghcr.io/${{ steps.lc.outputs.owner }}/${{ github.event.repository.name }}:latest
+            ghcr.io/${{ steps.lc.outputs.owner }}/${{ github.event.repository.name }}:${{ github.sha }}
