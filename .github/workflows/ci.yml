@@ -5,17 +5,14 @@ on:
   push:
     branches: ["main"]
 
-permissions:
-  contents: read
-  packages: write
-
 jobs:
   checks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
-      # Python
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -26,7 +23,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Node (call_worker)
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -38,12 +34,15 @@ jobs:
   docker:
     needs: checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Lowercase owner
-        id: lc
-        run: echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - name: Lowercase repository
+        id: repo
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
@@ -51,7 +50,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ github.token }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -59,5 +58,5 @@ jobs:
           context: .
           push: ${{ github.event_name != 'pull_request' }}
           tags: |
-            ghcr.io/${{ steps.lc.outputs.owner }}/${{ github.event.repository.name }}:latest
-            ghcr.io/${{ steps.lc.outputs.owner }}/${{ github.event.repository.name }}:${{ github.sha }}
+            ghcr.io/${{ steps.repo.outputs.name }}:latest
+            ghcr.io/${{ steps.repo.outputs.name }}:${{ github.sha }}
