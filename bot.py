@@ -246,6 +246,8 @@ class IntegratedBot:
             f"Worker heartbeat: {self.config.WORKER_HEARTBEAT_INTERVAL:.1f}s",
             f"Stop-timeout recovery: {self.config.WORKER_STOP_TIMEOUT_RESTART_THRESHOLD}",
             f"Worker membership mode: {self.config.WORKER_MEMBERSHIP_MODE}",
+            f"Playlist max tracks/request: {self.config.PLAYLIST_MAX_TRACKS_PER_REQUEST}",
+            f"Playlist background concurrency: {self.config.PLAYLIST_BACKGROUND_LOAD_CONCURRENCY}",
             f"History limit: {self.config.HISTORY_LIMIT}",
             f"Auto-accept invites: {'On' if self.config.AUTO_ACCEPT_INVITES else 'Off'}",
             f"Progress messages: {'On' if self.config.SHOW_PROGRESS_MESSAGES else 'Off'}",
@@ -428,7 +430,7 @@ class IntegratedBot:
         if not remaining_sources:
             return
 
-        semaphore = asyncio.Semaphore(4)
+        semaphore = asyncio.Semaphore(self.config.PLAYLIST_BACKGROUND_LOAD_CONCURRENCY)
 
         async def load_one(index: int, source_url: str):
             async with semaphore:
@@ -480,6 +482,72 @@ class IntegratedBot:
             await self.send_message(room_id, message)
         elif failures:
             await self.send_message(room_id, f"⚠️ Failed to load {failures} from `{queue_name}`")
+
+    async def _load_remaining_playlist_tracks(self, room_id: str, playlist_name: str, remaining_sources: list[str]):
+        if not remaining_sources:
+            return
+
+        semaphore = asyncio.Semaphore(self.config.PLAYLIST_BACKGROUND_LOAD_CONCURRENCY)
+
+        async def load_one(index: int, source_url: str):
+            async with semaphore:
+                ok, result = await self.audio_queue.download_audio(source_url)
+                return index, ok, result
+
+        try:
+            tasks = [asyncio.create_task(load_one(idx, src)) for idx, src in enumerate(remaining_sources)]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            return
+
+        loaded: list[dict] = []
+        failures = 0
+        ordered: list[tuple[int, bool, object]] = []
+        for item in results:
+            if isinstance(item, Exception):
+                failures += 1
+                continue
+            if not isinstance(item, tuple) or len(item) != 3:
+                failures += 1
+                continue
+            ordered.append(item)
+
+        ordered.sort(key=lambda x: x[0])
+        for _, ok, result in ordered:
+            if not ok or not isinstance(result, dict):
+                failures += 1
+                continue
+            loaded.append(result)
+
+        if not loaded and failures == 0:
+            return
+
+        added = 0
+        skipped_existing = 0
+        async with self._playback_lock:
+            for track in loaded:
+                source_url = track.get("source_url")
+                if isinstance(source_url, str) and source_url and self.audio_queue.has_source(source_url):
+                    skipped_existing += 1
+                    continue
+                self.audio_queue.add_to_queue(
+                    track["file"],
+                    track.get("title"),
+                    track.get("duration"),
+                    source_url=source_url,
+                    non_cacheable=bool(track.get("non_cacheable")),
+                )
+                added += 1
+
+        if added:
+            message = f"✅ Added {added} more from playlist `{playlist_name}`"
+            if skipped_existing:
+                message += f"\nSkipped already queued: {skipped_existing}"
+            if failures:
+                message += f"\nFailed: {failures}"
+            await self.send_message(room_id, message)
+        elif failures:
+            await self.send_message(room_id, f"⚠️ Failed to load {failures} from playlist `{playlist_name}`")
 
     async def _on_call_worker_event(self, event: dict):
         event_name = event.get("event")
@@ -709,6 +777,99 @@ class IntegratedBot:
                 if not await self._join_call_for_room(room.room_id):
                     return
                 self._cancel_background_load()
+
+                playlist_ok = False
+                playlist_info: dict | None = None
+                if self.audio_queue.looks_like_url(args):
+                    resolved_ok, resolved = await self.audio_queue.resolve_playlist_entries(args)
+                    if resolved_ok and isinstance(resolved, dict) and resolved.get("is_playlist"):
+                        playlist_ok = True
+                        playlist_info = resolved
+
+                if playlist_ok and isinstance(playlist_info, dict):
+                    entries = playlist_info.get("entries")
+                    if not isinstance(entries, list) or not entries:
+                        await self.send_message(room.room_id, "❌ Could not find playable tracks in that playlist")
+                        return
+
+                    playlist_name_raw = playlist_info.get("title")
+                    playlist_name = playlist_name_raw if isinstance(playlist_name_raw, str) and playlist_name_raw else "playlist"
+
+                    unique_sources: list[str] = []
+                    seen_sources: set[str] = set()
+                    for source in entries:
+                        if not isinstance(source, str) or not source:
+                            continue
+                        if source in seen_sources:
+                            continue
+                        seen_sources.add(source)
+                        unique_sources.append(source)
+
+                    over_limit_skipped = 0
+                    max_tracks = self.config.PLAYLIST_MAX_TRACKS_PER_REQUEST
+                    if len(unique_sources) > max_tracks:
+                        over_limit_skipped = len(unique_sources) - max_tracks
+                        unique_sources = unique_sources[:max_tracks]
+
+                    filtered_sources = [src for src in unique_sources if not self.audio_queue.has_source(src)]
+                    skipped_existing = len(unique_sources) - len(filtered_sources)
+                    if not filtered_sources:
+                        await self.send_message(
+                            room.room_id,
+                            f"ℹ️ All tracks from `{playlist_name}` are already playing or queued",
+                        )
+                        return
+
+                    await self.send_message(room.room_id, f"📥 Loading playlist `{playlist_name}`...")
+
+                    first_item = None
+                    first_index = -1
+                    failures = 0
+                    for index, source_url in enumerate(filtered_sources):
+                        success, result = await self.audio_queue.download_audio(source_url)
+                        if success and isinstance(result, dict):
+                            first_item = result
+                            first_index = index
+                            break
+                        failures += 1
+
+                    if first_item is None:
+                        await self.send_message(room.room_id, f"❌ Could not load any tracks from `{playlist_name}`")
+                        return
+
+                    async with self._playback_lock:
+                        had_current = self.audio_queue.current is not None or self.call_worker.state == "playing"
+                        self.audio_queue.add_to_queue(
+                            first_item["file"],
+                            first_item.get("title"),
+                            first_item.get("duration"),
+                            source_url=first_item.get("source_url"),
+                            non_cacheable=bool(first_item.get("non_cacheable")),
+                        )
+                        if not had_current:
+                            await self._advance_queue(room.room_id, force_next=True)
+
+                    loaded_count = 1
+                    remaining_sources = [src for idx, src in enumerate(filtered_sources) if idx != first_index]
+                    if remaining_sources:
+                        self._background_load_task = asyncio.create_task(
+                            self._load_remaining_playlist_tracks(room.room_id, playlist_name, remaining_sources)
+                        )
+
+                    summary = [f"✅ Playlist `{playlist_name}`: added {loaded_count} track"]
+                    if remaining_sources:
+                        summary.append(f"ℹ️ Loading {len(remaining_sources)} more in background")
+                    if skipped_existing:
+                        summary.append(f"Skipped already queued: {skipped_existing}")
+                    if over_limit_skipped:
+                        summary.append(
+                            f"Skipped by max_tracks_per_request ({self.config.PLAYLIST_MAX_TRACKS_PER_REQUEST}): {over_limit_skipped}"
+                        )
+                    if failures:
+                        summary.append(f"Failed: {failures}")
+                    await self.send_message(room.room_id, "\n".join(summary))
+                    return
+
                 if self.config.SHOW_PROGRESS_MESSAGES:
                     if not self.audio_queue.looks_like_url(args):
                         asyncio.create_task(self.send_message(room.room_id, f"🔎 Searching: {args}"))

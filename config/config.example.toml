@@ -46,6 +46,10 @@ membership_mode = "legacy" # legacy | matrix2_auto | matrix2
 log_max_bytes = 2000000
 log_backups = 5
 
+[playlist]
+max_tracks_per_request = 50
+background_load_concurrency = 4
+
 [logging]
 file = "logs/musicbot.log"
 clean_enabled = true

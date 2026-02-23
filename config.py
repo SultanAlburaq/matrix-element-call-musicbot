@@ -32,6 +32,8 @@ class Config:
         "worker.membership_mode": "legacy",
         "worker.log_max_bytes": 2_000_000,
         "worker.log_backups": 5,
+        "playlist.max_tracks_per_request": 50,
+        "playlist.background_load_concurrency": 4,
         "logging.file": "logs/musicbot.log",
         "logging.clean_enabled": True,
         "logging.clean_file": "logs/musicbot.clean.log",
@@ -177,6 +179,26 @@ class Config:
                 "WORKER_MEMBERSHIP_MODE/worker.membership_mode must be one of: matrix2_auto, matrix2, legacy"
             )
 
+        self.PLAYLIST_MAX_TRACKS_PER_REQUEST = self._get_nonnegative_int(
+            "PLAYLIST_MAX_TRACKS_PER_REQUEST",
+            "playlist",
+            "max_tracks_per_request",
+            self.DEFAULTS["playlist.max_tracks_per_request"],
+        )
+        if self.PLAYLIST_MAX_TRACKS_PER_REQUEST < 1:
+            raise ValueError("PLAYLIST_MAX_TRACKS_PER_REQUEST/playlist.max_tracks_per_request must be >= 1")
+
+        self.PLAYLIST_BACKGROUND_LOAD_CONCURRENCY = self._get_nonnegative_int(
+            "PLAYLIST_BACKGROUND_LOAD_CONCURRENCY",
+            "playlist",
+            "background_load_concurrency",
+            self.DEFAULTS["playlist.background_load_concurrency"],
+        )
+        if self.PLAYLIST_BACKGROUND_LOAD_CONCURRENCY < 1:
+            raise ValueError(
+                "PLAYLIST_BACKGROUND_LOAD_CONCURRENCY/playlist.background_load_concurrency must be >= 1"
+            )
+
         missing = [
             key
             for key, value in [
@@ -317,6 +339,8 @@ class Config:
             "worker.membership_mode = matrix2_auto | matrix2 | legacy",
             f"worker.log_max_bytes = {cls.DEFAULTS['worker.log_max_bytes']}",
             f"worker.log_backups = {cls.DEFAULTS['worker.log_backups']}",
+            f"playlist.max_tracks_per_request = {cls.DEFAULTS['playlist.max_tracks_per_request']}",
+            f"playlist.background_load_concurrency = {cls.DEFAULTS['playlist.background_load_concurrency']}",
             f"logging.file = {cls.DEFAULTS['logging.file']}",
             f"logging.clean_enabled = {str(cls.DEFAULTS['logging.clean_enabled']).lower()}",
             f"logging.clean_file = {cls.DEFAULTS['logging.clean_file']}",

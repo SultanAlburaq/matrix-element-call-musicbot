@@ -282,6 +282,76 @@ class AudioQueue:
         }
         return True, out
 
+    async def resolve_playlist_entries(self, url: str) -> tuple[bool, dict | str]:
+        """Resolve playlist metadata and entry URLs for a playlist URL.
+
+        Returns:
+            (success, result)
+
+            Success result shape:
+            {
+                "is_playlist": bool,
+                "title": Optional[str],
+                "entries": list[str],
+            }
+        """
+        candidate = self.normalize_media_url((url or "").strip())
+        if not self.looks_like_url(candidate):
+            return True, {"is_playlist": False, "title": None, "entries": []}
+
+        dlp_cmd = "yt-dlp" if shutil.which("yt-dlp") else "youtube-dlp"
+        if not shutil.which(dlp_cmd):
+            return False, "yt-dlp (or youtube-dlp) is not installed"
+
+        code, stdout, stderr = await self._run_command(
+            dlp_cmd,
+            "--flat-playlist",
+            "--dump-single-json",
+            candidate,
+        )
+        if code != 0:
+            return False, (stderr.strip() or "Failed to resolve playlist metadata")
+
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            return False, "Could not parse playlist metadata"
+
+        if not isinstance(data, dict):
+            return True, {"is_playlist": False, "title": None, "entries": []}
+
+        entries = data.get("entries")
+        if not isinstance(entries, list) or not entries:
+            return True, {"is_playlist": False, "title": None, "entries": []}
+
+        urls: list[str] = []
+        seen: set[str] = set()
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+
+            webpage_url = item.get("webpage_url")
+            raw_url = webpage_url if isinstance(webpage_url, str) and webpage_url else item.get("url")
+            if not isinstance(raw_url, str) or not raw_url.strip():
+                continue
+
+            normalized = self.normalize_media_url(raw_url.strip())
+            if not self.looks_like_url(normalized):
+                entry_id = item.get("id")
+                if isinstance(entry_id, str) and entry_id:
+                    normalized = f"https://www.youtube.com/watch?v={entry_id}"
+                else:
+                    continue
+
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            urls.append(normalized)
+
+        title_value = data.get("title")
+        title = self.normalize_title(str(title_value)) if isinstance(title_value, str) else None
+        return True, {"is_playlist": True, "title": title, "entries": urls}
+
     async def download_audio(self, query_or_url: str) -> tuple[bool, dict | str]:
         """Download audio from URL/search with caching and pre-roll silence.
 
