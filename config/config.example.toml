@@ -30,6 +30,12 @@ cache_mode = "size_lru" # always_delete | never_delete | size_lru
 cache_max_bytes = 1073741824 # 1GB default, minimum 200MB in size_lru
 cache_delete_after_playback = false
 cache_delete_on_shutdown = true
+search_mode = "fast" # fast | accurate
+search_timeout_seconds = 8.0
+extractor_retries = 1
+stream_first_idle = true
+stream_prefetch_current = true
+stream_retry_to_file_on_fail = true
 
 auto_advance_buffer = 2.0
 preroll_silence = 1.0
@@ -61,3 +67,4 @@ backups = 5
 [ui]
 show_progress_messages = false
 rich_formatting = false
+quiet_mode = true

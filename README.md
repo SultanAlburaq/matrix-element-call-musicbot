@@ -11,6 +11,14 @@ Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`
 - Playback history and now-playing visibility
 - Audio controls (volume, fade-in, normalization)
 - Built-in diagnostics and runtime status commands
+- Quiet-mode messaging defaults for less chat noise during playback
+- Fast search defaults for quicker `!play` query resolution
+
+## Performance Defaults
+
+- `ui.quiet_mode = true` by default (suppresses non-critical chatter)
+- `audio.search_mode = "fast"` by default (faster query resolution)
+- `audio.stream_first_idle = true` by default (instant playback start when idle)
 
 ## Important
 

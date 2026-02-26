@@ -411,9 +411,9 @@ class CallWorker {
         logLine(`volume target updated percent=${normalizedPercent} gain=${this.targetVolumeGain.toFixed(3)}`);
     }
 
-    enqueuePlay(filePath, title = null) {
+    enqueuePlay(inputSource, title = null, sourceType = "file") {
         const run = async () => {
-            await this.playFile(filePath, title);
+            await this.playSource(inputSource, title, sourceType);
         };
         this.playbackQueue = this.playbackQueue.then(run, run);
         return this.playbackQueue;
@@ -510,7 +510,7 @@ class CallWorker {
         emit({ event: "livekit_connected", auth_mode: config._auth_mode || "unknown" });
     }
 
-    async playFile(filePath, title = null) {
+    async playSource(inputSource, title = null, sourceType = "file") {
         await this.connectLivekit();
         await this.stopPlayback();
         try {
@@ -522,9 +522,19 @@ class CallWorker {
         const playbackToken = this.currentPlaybackToken + 1;
         this.currentPlaybackToken = playbackToken;
 
-        emit({ event: "play_started", file: filePath, title });
+        const sourceLabel = String(inputSource || "");
+        const isStream = sourceType === "url";
+
+        emit({
+            event: "play_started",
+            source: sourceLabel,
+            file: isStream ? undefined : sourceLabel,
+            url: isStream ? sourceLabel : undefined,
+            title,
+        });
         logLine(
-            `play begin file=${filePath} title=${title || ""} volume_target=${(this.targetVolumeGain * 100).toFixed(0)}%`,
+            `play begin ${isStream ? "url" : "file"}=${sourceLabel} title=${title || ""} ` +
+                `volume_target=${(this.targetVolumeGain * 100).toFixed(0)}%`,
         );
 
         const audioFilters = [];
@@ -540,9 +550,18 @@ class CallWorker {
             "-loglevel",
             "error",
             "-nostdin",
-            "-i",
-            filePath,
         ];
+        if (isStream) {
+            ffmpegArgs.push(
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_delay_max",
+                "5",
+            );
+        }
+        ffmpegArgs.push("-i", sourceLabel);
         if (audioFilters.length > 0) {
             ffmpegArgs.push("-af", audioFilters.join(","));
             logLine(`ffmpeg audio filters=${audioFilters.join(",")}`);
@@ -679,7 +698,13 @@ class CallWorker {
             logLine(`ffmpeg closed code=${exitCode}`);
 
             if (this.currentPlaybackToken !== playbackToken) {
-                emit({ event: "play_stopped", file: filePath, title });
+                emit({
+                    event: "play_stopped",
+                    source: sourceLabel,
+                    file: isStream ? undefined : sourceLabel,
+                    url: isStream ? sourceLabel : undefined,
+                    title,
+                });
                 return;
             }
             if (exitCode !== 0) {
@@ -693,10 +718,22 @@ class CallWorker {
             logLine(
                 `playback complete title=${title || ""} frames=${sentFrames} seconds=${(sentFrames * FRAME_MS) / 1000} max_abs=${maxAbs}`,
             );
-            emit({ event: "play_ended", file: filePath, title });
+            emit({
+                event: "play_ended",
+                source: sourceLabel,
+                file: isStream ? undefined : sourceLabel,
+                url: isStream ? sourceLabel : undefined,
+                title,
+            });
         } catch (error) {
             if (this.currentPlaybackToken !== playbackToken) {
-                emit({ event: "play_stopped", file: filePath, title });
+                emit({
+                    event: "play_stopped",
+                    source: sourceLabel,
+                    file: isStream ? undefined : sourceLabel,
+                    url: isStream ? sourceLabel : undefined,
+                    title,
+                });
                 return;
             }
             throw error;
@@ -898,10 +935,14 @@ async function main() {
 
         try {
             if (command.type === "play") {
-                if (!command.file) {
-                    throw new Error("Missing 'file' in play command");
+                const filePath = typeof command.file === "string" ? command.file : null;
+                const streamUrl = typeof command.url === "string" ? command.url : null;
+                if (!filePath && !streamUrl) {
+                    throw new Error("Missing 'file' or 'url' in play command");
                 }
-                void worker.enqueuePlay(command.file, command.title ?? null).catch((error) => {
+                const sourceValue = filePath || streamUrl;
+                const sourceType = filePath ? "file" : "url";
+                void worker.enqueuePlay(sourceValue, command.title ?? null, sourceType).catch((error) => {
                     emit({ event: "error", message: error instanceof Error ? error.message : String(error) });
                 });
                 continue;

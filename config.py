@@ -25,6 +25,12 @@ class Config:
         "audio.cache_max_bytes": 1_073_741_824,
         "audio.cache_delete_after_playback": False,
         "audio.cache_delete_on_shutdown": True,
+        "audio.search_mode": "fast",
+        "audio.search_timeout_seconds": 8.0,
+        "audio.extractor_retries": 1,
+        "audio.stream_first_idle": True,
+        "audio.stream_prefetch_current": True,
+        "audio.stream_retry_to_file_on_fail": True,
         "worker.max_restart_attempts": 3,
         "worker.heartbeat_interval_seconds": 10.0,
         "worker.skip_cooldown_seconds": 1.0,
@@ -42,6 +48,7 @@ class Config:
         "logging.backups": 5,
         "ui.show_progress_messages": False,
         "ui.rich_formatting": False,
+        "ui.quiet_mode": True,
     }
 
     def __init__(self):
@@ -139,6 +146,45 @@ class Config:
             "SHOW_PROGRESS_MESSAGES", "ui", "show_progress_messages", self.DEFAULTS["ui.show_progress_messages"]
         )
         self.RICH_FORMATTING = self._get_bool("RICH_FORMATTING", "ui", "rich_formatting", self.DEFAULTS["ui.rich_formatting"])
+        self.QUIET_MODE = self._get_bool("QUIET_MODE", "ui", "quiet_mode", self.DEFAULTS["ui.quiet_mode"])
+
+        self.SEARCH_MODE = (
+            self._get_str("SEARCH_MODE", "audio", "search_mode", default=self.DEFAULTS["audio.search_mode"])
+            or self.DEFAULTS["audio.search_mode"]
+        )
+        self.SEARCH_MODE = self.SEARCH_MODE.strip().lower()
+        if self.SEARCH_MODE not in {"fast", "accurate"}:
+            raise ValueError("SEARCH_MODE/audio.search_mode must be one of: fast, accurate")
+        self.SEARCH_TIMEOUT_SECONDS = self._get_nonnegative_float(
+            "SEARCH_TIMEOUT_SECONDS",
+            "audio",
+            "search_timeout_seconds",
+            self.DEFAULTS["audio.search_timeout_seconds"],
+        )
+        self.EXTRACTOR_RETRIES = self._get_nonnegative_int(
+            "EXTRACTOR_RETRIES",
+            "audio",
+            "extractor_retries",
+            self.DEFAULTS["audio.extractor_retries"],
+        )
+        self.STREAM_FIRST_IDLE = self._get_bool(
+            "STREAM_FIRST_IDLE",
+            "audio",
+            "stream_first_idle",
+            self.DEFAULTS["audio.stream_first_idle"],
+        )
+        self.STREAM_PREFETCH_CURRENT = self._get_bool(
+            "STREAM_PREFETCH_CURRENT",
+            "audio",
+            "stream_prefetch_current",
+            self.DEFAULTS["audio.stream_prefetch_current"],
+        )
+        self.STREAM_RETRY_TO_FILE_ON_FAIL = self._get_bool(
+            "STREAM_RETRY_TO_FILE_ON_FAIL",
+            "audio",
+            "stream_retry_to_file_on_fail",
+            self.DEFAULTS["audio.stream_retry_to_file_on_fail"],
+        )
 
         self.WORKER_LOG_MAX_BYTES = self._get_nonnegative_int(
             "WORKER_LOG_MAX_BYTES", "worker", "log_max_bytes", self.DEFAULTS["worker.log_max_bytes"]
@@ -332,6 +378,15 @@ class Config:
             f"audio.cache_max_bytes = {cls.DEFAULTS['audio.cache_max_bytes']} (1GB)",
             f"audio.cache_delete_after_playback = {str(cls.DEFAULTS['audio.cache_delete_after_playback']).lower()}",
             f"audio.cache_delete_on_shutdown = {str(cls.DEFAULTS['audio.cache_delete_on_shutdown']).lower()}",
+            "audio.search_mode = fast | accurate",
+            f"audio.search_timeout_seconds = {cls.DEFAULTS['audio.search_timeout_seconds']}",
+            f"audio.extractor_retries = {cls.DEFAULTS['audio.extractor_retries']}",
+            f"audio.stream_first_idle = {str(cls.DEFAULTS['audio.stream_first_idle']).lower()}",
+            f"audio.stream_prefetch_current = {str(cls.DEFAULTS['audio.stream_prefetch_current']).lower()}",
+            (
+                "audio.stream_retry_to_file_on_fail = "
+                f"{str(cls.DEFAULTS['audio.stream_retry_to_file_on_fail']).lower()}"
+            ),
             f"worker.max_restart_attempts = {cls.DEFAULTS['worker.max_restart_attempts']}",
             f"worker.heartbeat_interval_seconds = {cls.DEFAULTS['worker.heartbeat_interval_seconds']}",
             f"worker.skip_cooldown_seconds = {cls.DEFAULTS['worker.skip_cooldown_seconds']}",
@@ -352,6 +407,7 @@ class Config:
             f"logging.backups = {cls.DEFAULTS['logging.backups']}",
             f"ui.show_progress_messages = {str(cls.DEFAULTS['ui.show_progress_messages']).lower()}",
             f"ui.rich_formatting = {str(cls.DEFAULTS['ui.rich_formatting']).lower()}",
+            f"ui.quiet_mode = {str(cls.DEFAULTS['ui.quiet_mode']).lower()}",
             f"audio.cache_max_bytes minimum in size_lru mode = {MIN_AUDIO_CACHE_MAX_BYTES} (200MB)",
         ]
         return "\n".join(lines)

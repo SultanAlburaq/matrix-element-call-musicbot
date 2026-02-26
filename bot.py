@@ -1,11 +1,12 @@
 import asyncio
 from collections import defaultdict, deque
+from dataclasses import dataclass
 import logging
 from pathlib import Path
 import shutil
 import subprocess
 import time
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from nio import AsyncClient, InviteMemberEvent, MatrixRoom, RoomMessageText
 
@@ -16,6 +17,14 @@ from saved_queues import SavedQueueStore
 
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class OutboundMessage:
+    room_id: str
+    text: str
+    html_body: Optional[str]
+    priority: str
 
 
 class IntegratedBot:
@@ -35,12 +44,16 @@ class IntegratedBot:
             cache_max_bytes=config.AUDIO_CACHE_MAX_BYTES,
             cache_delete_after_playback=config.AUDIO_CACHE_DELETE_AFTER_PLAYBACK,
             cache_delete_on_shutdown=config.AUDIO_CACHE_DELETE_ON_SHUTDOWN,
+            search_mode=config.SEARCH_MODE,
+            search_timeout_seconds=config.SEARCH_TIMEOUT_SECONDS,
+            extractor_retries=config.EXTRACTOR_RETRIES,
         )
 
         self._auto_advance_task: Optional[asyncio.Task] = None
         self._advance_watchdog_task: Optional[asyncio.Task] = None
         self._worker_playback_task: Optional[asyncio.Task] = None
         self._background_load_task: Optional[asyncio.Task] = None
+        self._stream_prefetch_task: Optional[asyncio.Task] = None
         self._current_room_id: Optional[str] = None
         self._current_track_started_at: Optional[float] = None
         self._playback_generation = 0
@@ -54,6 +67,11 @@ class IntegratedBot:
         self._play_history_by_room: dict[str, deque[dict]] = defaultdict(
             lambda: deque(maxlen=max(1, self.config.HISTORY_LIMIT))
         )
+        self._message_queue: asyncio.PriorityQueue[tuple[int, int, OutboundMessage]] = asyncio.PriorityQueue()
+        self._message_dispatch_task: Optional[asyncio.Task] = None
+        self._message_seq = 0
+        self._noisy_cooldown_until: dict[tuple[str, str], float] = {}
+        self._message_priority_map = {"critical": 0, "normal": 1, "noisy": 2}
         self.call_worker = CallWorkerProcess(
             Path(__file__).resolve().parent,
             max_restart_attempts=config.WORKER_MAX_RESTART_ATTEMPTS,
@@ -77,11 +95,73 @@ class IntegratedBot:
         self.client.add_event_callback(self.on_message, RoomMessageText)
         self.client.add_event_callback(self.on_invite, InviteMemberEvent)
 
+        self._command_handlers: dict[str, Callable[[MatrixRoom, str], Awaitable[None]]] = {}
+        self._register_command_handlers()
+
     def _cancel_auto_advance(self):
         if self._auto_advance_task and not self._auto_advance_task.done():
             self._auto_advance_task.cancel()
             logger.info("Cancelled auto-advance timer")
         self._auto_advance_task = None
+
+    def _start_message_dispatcher(self):
+        if self._message_dispatch_task and not self._message_dispatch_task.done():
+            return
+        self._message_dispatch_task = asyncio.create_task(self._message_dispatch_loop())
+
+    async def _stop_message_dispatcher(self):
+        task = self._message_dispatch_task
+        if not task:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        self._message_dispatch_task = None
+
+    def _should_emit_message(self, text: str, priority: str) -> bool:
+        if priority == "critical":
+            return True
+        if not self.config.QUIET_MODE:
+            return True
+        if priority == "noisy":
+            return False
+        return True
+
+    async def _queue_message(self, room_id: str, text: str, *, html_body: Optional[str], priority: str):
+        if not self._should_emit_message(text, priority):
+            return
+        if priority == "noisy":
+            key = (room_id, text)
+            now = asyncio.get_running_loop().time()
+            cool_until = self._noisy_cooldown_until.get(key)
+            if cool_until is not None and now < cool_until:
+                return
+            self._noisy_cooldown_until[key] = now + 2.5
+        self._message_seq += 1
+        msg = OutboundMessage(room_id=room_id, text=text, html_body=html_body, priority=priority)
+        await self._message_queue.put((self._message_priority_map[priority], self._message_seq, msg))
+
+    async def _message_dispatch_loop(self):
+        try:
+            while True:
+                _, _, msg = await self._message_queue.get()
+                try:
+                    await self._send_message_now(msg.room_id, msg.text, html_body=msg.html_body)
+                except Exception as exc:
+                    logger.error("Error sending message: %s", exc)
+                finally:
+                    self._message_queue.task_done()
+        except asyncio.CancelledError:
+            raise
+
+    async def _send_message_now(self, room_id: str, text: str, *, html_body: Optional[str] = None):
+        content = {"msgtype": "m.text", "body": text}
+        if self.config.RICH_FORMATTING and html_body:
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = html_body
+        await self.client.room_send(room_id, message_type="m.room.message", content=content)
 
     def _ensure_advance_watchdog(self):
         if self._advance_watchdog_task and not self._advance_watchdog_task.done():
@@ -241,6 +321,15 @@ class IntegratedBot:
             f"Cache max size: {self._format_bytes(self.config.AUDIO_CACHE_MAX_BYTES)}",
             f"Delete after playback: {'On' if self.config.AUDIO_CACHE_DELETE_AFTER_PLAYBACK else 'Off'}",
             f"Delete on shutdown: {'On' if self.config.AUDIO_CACHE_DELETE_ON_SHUTDOWN else 'Off'}",
+            f"Search mode: {self.config.SEARCH_MODE}",
+            f"Search timeout: {self.config.SEARCH_TIMEOUT_SECONDS:.1f}s",
+            f"Extractor retries: {self.config.EXTRACTOR_RETRIES}",
+            f"Stream first when idle: {'On' if self.config.STREAM_FIRST_IDLE else 'Off'}",
+            f"Stream prefetch current: {'On' if self.config.STREAM_PREFETCH_CURRENT else 'Off'}",
+            (
+                "Stream retry to file on fail: "
+                f"{'On' if self.config.STREAM_RETRY_TO_FILE_ON_FAIL else 'Off'}"
+            ),
             f"Skip cooldown: {self.config.SKIP_COOLDOWN_SECONDS:.1f}s",
             f"Worker restarts: {self.config.WORKER_MAX_RESTART_ATTEMPTS}",
             f"Worker heartbeat: {self.config.WORKER_HEARTBEAT_INTERVAL:.1f}s",
@@ -251,6 +340,7 @@ class IntegratedBot:
             f"History limit: {self.config.HISTORY_LIMIT}",
             f"Auto-accept invites: {'On' if self.config.AUTO_ACCEPT_INVITES else 'Off'}",
             f"Progress messages: {'On' if self.config.SHOW_PROGRESS_MESSAGES else 'Off'}",
+            f"Quiet mode: {'On' if self.config.QUIET_MODE else 'Off'}",
             f"Log file: {self.config.LOG_FILE}",
             f"Clean log: {self.config.CLEAN_LOG_FILE if self.config.CLEAN_LOG_ENABLED else 'Off'}",
         ]
@@ -272,13 +362,200 @@ class IntegratedBot:
             volume_percent=self.config.VOLUME_PERCENT,
         )
 
+    @staticmethod
+    def _track_source_ref(track: Optional[dict]) -> Optional[str]:
+        if not isinstance(track, dict):
+            return None
+        active_source = track.get("active_source")
+        if isinstance(active_source, str) and active_source:
+            return active_source
+        file_path = track.get("file")
+        if isinstance(file_path, str) and file_path:
+            return file_path
+        stream_url = track.get("stream_url")
+        if isinstance(stream_url, str) and stream_url:
+            return stream_url
+        return None
+
+    async def _play_track_in_worker(self, track: dict, *, pre_stop: bool = True) -> tuple[int, Optional[str]]:
+        should_wait_stop = pre_stop and self.call_worker.state == "playing"
+        if should_wait_stop:
+            await self.call_worker.stop_playback(wait_for_terminal=True, timeout=3.0)
+        file_path = track.get("file")
+        stream_url = track.get("stream_url")
+        title = track.get("title")
+        selected_source: Optional[str] = None
+        if isinstance(file_path, str) and file_path:
+            await self.call_worker.play(file_path, title)
+            selected_source = file_path
+        elif isinstance(stream_url, str) and stream_url:
+            await self.call_worker.play_stream(stream_url, title)
+            selected_source = stream_url
+        else:
+            raise RuntimeError("Track has neither file nor stream source")
+        track["active_source"] = selected_source
+        self._playback_generation += 1
+        generation = self._playback_generation
+        return generation, self._track_source_ref(track)
+
+    def _cancel_stream_prefetch(self):
+        if self._stream_prefetch_task and not self._stream_prefetch_task.done():
+            self._stream_prefetch_task.cancel()
+        self._stream_prefetch_task = None
+
+    async def _prefetch_current_track_file(self, room_id: str, source_url: str, expected_generation: int):
+        try:
+            success, result = await self.audio_queue.download_audio(source_url)
+        except asyncio.CancelledError:
+            return
+        if not success or not isinstance(result, dict):
+            return
+
+        replay_needed = False
+        async with self._playback_lock:
+            if expected_generation != self._playback_generation:
+                return
+            current = self.audio_queue.current
+            if not isinstance(current, dict):
+                return
+            if current.get("source_url") != source_url:
+                return
+            current["file"] = result.get("file")
+            current["non_cacheable"] = bool(result.get("non_cacheable"))
+            replay_needed = self.audio_queue.loop_mode and self.call_worker.state != "playing"
+
+        if replay_needed:
+            try:
+                await self._advance_queue(room_id, force_next=False, pre_stop=False)
+            except Exception:
+                logger.exception("Failed to resume loop playback after stream prefetch")
+
+    async def _retry_stream_track_as_file(self, room_id: str, track: dict) -> bool:
+        source_url = track.get("source_url") if isinstance(track, dict) else None
+        if not isinstance(source_url, str) or not source_url:
+            return False
+        success, result = await self.audio_queue.download_audio(source_url)
+        if not success or not isinstance(result, dict):
+            return False
+
+        track["file"] = result.get("file")
+        track["non_cacheable"] = bool(result.get("non_cacheable"))
+        try:
+            generation, source_ref = await self._play_track_in_worker(track, pre_stop=False)
+        except Exception:
+            return False
+
+        self._current_track_started_at = asyncio.get_running_loop().time()
+        self._worker_playback_task = asyncio.create_task(
+            self._wait_for_worker_playback(room_id, generation, source_ref)
+        )
+        self._arm_auto_advance(
+            track.get("duration"),
+            room_id,
+            expected_generation=generation,
+            expected_source=source_ref,
+        )
+        return True
+
+    def _should_stream_first_idle(self) -> bool:
+        if not self.config.STREAM_FIRST_IDLE:
+            return False
+        if self.audio_queue.current is not None:
+            return False
+        if self.audio_queue.queue:
+            return False
+        if self.call_worker.state == "playing":
+            return False
+        return True
+
+    async def _try_stream_first_idle_play(self, room_id: str, args: str) -> bool:
+        if not self._should_stream_first_idle():
+            return False
+
+        join_task = asyncio.create_task(self._join_call_for_room(room_id))
+        resolve_task = asyncio.create_task(self.audio_queue.resolve_stream_source(args))
+        join_ok = False
+        try:
+            join_ok, resolved = await asyncio.gather(join_task, resolve_task)
+        except Exception as exc:
+            logger.warning("Stream-first resolve failed, falling back to file download: %s", exc)
+            return False
+
+        if not join_ok:
+            return False
+        if not isinstance(resolved, tuple) or len(resolved) != 2:
+            return False
+        success, result = resolved
+        if not success:
+            return False
+        if not isinstance(result, dict):
+            return False
+
+        source_url = result.get("source_url")
+        if isinstance(source_url, str) and self.audio_queue.has_source(source_url):
+            await self.send_message(
+                room_id,
+                "ℹ️ That track is already playing or queued. Use `!loop` if you want repeats.",
+            )
+            return True
+
+        title = result.get("title") or "track"
+        duration = result.get("duration")
+
+        track = {
+            "title": title,
+            "duration": duration,
+            "source_url": source_url,
+            "stream_url": result.get("stream_url"),
+            "non_cacheable": True,
+        }
+
+        previous_current = self.audio_queue.current
+        previous_room_id = self._current_room_id
+        previous_started_at = self._current_track_started_at
+        self._cancel_stream_prefetch()
+        generation = 0
+        source_ref = None
+        try:
+            async with self._playback_lock:
+                self.audio_queue.current = track
+                self._current_room_id = room_id
+                generation, source_ref = await self._play_track_in_worker(track, pre_stop=False)
+                self._current_track_started_at = asyncio.get_running_loop().time()
+                self._push_play_history(room_id, track)
+                self._worker_playback_task = asyncio.create_task(
+                    self._wait_for_worker_playback(room_id, generation, source_ref)
+                )
+                self._arm_auto_advance(
+                    track.get("duration"),
+                    room_id,
+                    expected_generation=generation,
+                    expected_source=source_ref,
+                )
+        except Exception as exc:
+            logger.warning("Stream-first playback start failed, falling back to file download: %s", exc)
+            async with self._playback_lock:
+                if self.audio_queue.current is track:
+                    self.audio_queue.current = previous_current
+                    self._current_room_id = previous_room_id
+                    self._current_track_started_at = previous_started_at
+            return False
+
+        await self.send_message(room_id, f"▶️ Now playing: {title}")
+
+        if self.config.STREAM_PREFETCH_CURRENT and isinstance(source_url, str) and source_url:
+            self._stream_prefetch_task = asyncio.create_task(
+                self._prefetch_current_track_file(room_id, source_url, generation)
+            )
+        return True
+
     def _arm_auto_advance(
         self,
         duration: Optional[float],
         room_id: str,
         *,
         expected_generation: Optional[int] = None,
-        expected_file: Optional[str] = None,
+        expected_source: Optional[str] = None,
     ):
         if self.audio_queue.loop_mode:
             logger.info("Loop mode enabled - auto-advance disabled")
@@ -289,7 +566,7 @@ class IntegratedBot:
         self._cancel_auto_advance()
         generation = self._playback_generation if expected_generation is None else expected_generation
         self._auto_advance_task = asyncio.create_task(
-            self._auto_advance_timer(float(duration), room_id, generation, expected_file)
+            self._auto_advance_timer(float(duration), room_id, generation, expected_source)
         )
 
     async def _sync_current_track_to_worker(self, room_id: str, announce: bool = True) -> bool:
@@ -303,22 +580,16 @@ class IntegratedBot:
         try:
             self._cancel_worker_playback_wait()
             await self.call_worker.stop_playback(wait_for_terminal=False)
-            await self.call_worker.play(
-                self.audio_queue.current["file"],
-                self.audio_queue.current["title"],
-            )
-            self._playback_generation += 1
-            generation = self._playback_generation
-            file_path = self.audio_queue.current.get("file")
+            generation, source_ref = await self._play_track_in_worker(self.audio_queue.current, pre_stop=False)
             self._current_track_started_at = asyncio.get_running_loop().time()
             self._worker_playback_task = asyncio.create_task(
-                self._wait_for_worker_playback(room_id, generation, file_path)
+                self._wait_for_worker_playback(room_id, generation, source_ref)
             )
             self._arm_auto_advance(
                 self.audio_queue.current.get("duration"),
                 room_id,
                 expected_generation=generation,
-                expected_file=file_path,
+                expected_source=source_ref,
             )
             if announce:
                 await self.send_message(room_id, f"▶️ Synced current track to call: {self.audio_queue.current['title']}")
@@ -344,8 +615,10 @@ class IntegratedBot:
             }
         )
 
-    async def _join_call_for_room(self, room_id: str) -> bool:
+    async def _join_call_for_room(self, room_id: str, *, announce_if_already_joined: bool = False) -> bool:
         if self._is_joined_in_room_call(room_id):
+            if announce_if_already_joined:
+                await self.send_message(room_id, "ℹ️ Already joined this room call")
             return True
 
         if not self.call_worker.available:
@@ -392,12 +665,13 @@ class IntegratedBot:
             self._background_load_task.cancel()
             logger.info("Cancelled background queue loader")
         self._background_load_task = None
+        self._cancel_stream_prefetch()
 
     async def _wait_for_worker_playback(
         self,
         room_id: str,
         expected_generation: int,
-        expected_file: Optional[str],
+        expected_source: Optional[str],
     ):
         try:
             event = await self.call_worker.wait_for_playback_terminal()
@@ -407,15 +681,33 @@ class IntegratedBot:
             logger.error(f"Call worker playback error: {exc}")
             if "InvalidState - failed to capture frame" not in str(exc):
                 await self.send_message(room_id, f"❌ Playback worker error: {exc}")
+            async with self._playback_lock:
+                if expected_generation != self._playback_generation:
+                    logger.info("Ignoring playback recovery (generation changed)")
+                    return
+                current_source = self._track_source_ref(self.audio_queue.current)
+                if expected_source and current_source and current_source != expected_source:
+                    logger.info("Ignoring playback recovery (track changed)")
+                    return
+
+                self._cancel_auto_advance()
+                self._current_track_started_at = None
+
+                if self.audio_queue.queue:
+                    await self._advance_queue(room_id, force_next=True, pre_stop=False)
+                    return
+
+                if self.audio_queue.current is not None:
+                    self.audio_queue.current = None
             return
 
         if expected_generation != self._playback_generation:
             logger.info("Ignoring stale worker terminal event (generation changed)")
             return
 
-        event_file = event.get("file")
-        current_file = self.audio_queue.current.get("file") if isinstance(self.audio_queue.current, dict) else None
-        if expected_file and current_file and event_file and event_file != expected_file:
+        event_source = event.get("source") or event.get("file") or event.get("url")
+        current_source = self._track_source_ref(self.audio_queue.current)
+        if expected_source and current_source and event_source and event_source != expected_source:
             logger.info("Ignoring stale worker terminal event (track changed)")
             return
 
@@ -424,66 +716,37 @@ class IntegratedBot:
             return
 
         async with self._playback_lock:
-            await self._advance_queue(room_id, force_next=True)
+            await self._advance_queue(room_id, force_next=not self.audio_queue.loop_mode)
 
-    async def _load_remaining_saved_tracks(self, room_id: str, queue_name: str, remaining_sources: list[str]):
-        if not remaining_sources:
-            return
-
-        semaphore = asyncio.Semaphore(self.config.PLAYLIST_BACKGROUND_LOAD_CONCURRENCY)
-
-        async def load_one(index: int, source_url: str):
-            async with semaphore:
-                ok, result = await self.audio_queue.download_audio(source_url)
-                return index, ok, result
-
-        try:
-            tasks = [asyncio.create_task(load_one(idx, src)) for idx, src in enumerate(remaining_sources)]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            return
-
-        loaded: list[dict] = []
+    async def _download_first_available_source(self, sources: list[str]) -> tuple[Optional[dict], int, int]:
+        first_item: Optional[dict] = None
+        first_index = -1
         failures = 0
-        ordered: list[tuple[int, bool, object]] = []
-        for item in results:
-            if isinstance(item, Exception):
-                failures += 1
-                continue
-            if not isinstance(item, tuple) or len(item) != 3:
-                failures += 1
-                continue
-            ordered.append(item)
+        for index, source_url in enumerate(sources):
+            success, result = await self.audio_queue.download_audio(source_url)
+            if success and isinstance(result, dict):
+                first_item = result
+                first_index = index
+                break
+            failures += 1
+        return first_item, first_index, failures
 
-        ordered.sort(key=lambda x: x[0])
-        for _, ok, result in ordered:
-            if not ok or not isinstance(result, dict):
-                failures += 1
-                continue
-            loaded.append(result)
+    @staticmethod
+    def _parse_int_arg(raw: str) -> Optional[int]:
+        try:
+            return int(raw)
+        except ValueError:
+            return None
 
-        if not loaded and failures == 0:
-            return
-
-        async with self._playback_lock:
-            for track in loaded:
-                self.audio_queue.add_to_queue(
-                    track["file"],
-                    track.get("title"),
-                    track.get("duration"),
-                    source_url=track.get("source_url"),
-                    non_cacheable=bool(track.get("non_cacheable")),
-                )
-
-        if loaded:
-            message = f"✅ Added {len(loaded)} more from `{queue_name}`"
-            if failures:
-                message += f"\nFailed: {failures}"
-            await self.send_message(room_id, message)
-        elif failures:
-            await self.send_message(room_id, f"⚠️ Failed to load {failures} from `{queue_name}`")
-
-    async def _load_remaining_playlist_tracks(self, room_id: str, playlist_name: str, remaining_sources: list[str]):
+    async def _load_remaining_tracks(
+        self,
+        room_id: str,
+        collection_name: str,
+        remaining_sources: list[str],
+        *,
+        dedupe_existing: bool,
+        source_label: str,
+    ):
         if not remaining_sources:
             return
 
@@ -527,7 +790,7 @@ class IntegratedBot:
         async with self._playback_lock:
             for track in loaded:
                 source_url = track.get("source_url")
-                if isinstance(source_url, str) and source_url and self.audio_queue.has_source(source_url):
+                if dedupe_existing and isinstance(source_url, str) and source_url and self.audio_queue.has_source(source_url):
                     skipped_existing += 1
                     continue
                 self.audio_queue.add_to_queue(
@@ -540,14 +803,14 @@ class IntegratedBot:
                 added += 1
 
         if added:
-            message = f"✅ Added {added} more from playlist `{playlist_name}`"
+            message = f"✅ Added {added} more from {source_label} `{collection_name}`"
             if skipped_existing:
                 message += f"\nSkipped already queued: {skipped_existing}"
             if failures:
                 message += f"\nFailed: {failures}"
             await self.send_message(room_id, message)
         elif failures:
-            await self.send_message(room_id, f"⚠️ Failed to load {failures} from playlist `{playlist_name}`")
+            await self.send_message(room_id, f"⚠️ Failed to load {failures} from {source_label} `{collection_name}`")
 
     async def _on_call_worker_event(self, event: dict):
         event_name = event.get("event")
@@ -568,19 +831,20 @@ class IntegratedBot:
             await self.send_message(
                 room_id,
                 f"⚠️ Call worker disconnected. Reconnecting (attempt {attempt}, retry in {backoff}s)...",
+                priority="critical",
             )
             return
 
         if event_name == "worker_restarted":
             self._restart_failed_notified = False
-            await self.send_message(room_id, "✅ Call worker reconnected")
+            await self.send_message(room_id, "✅ Call worker reconnected", priority="critical")
             await self._sync_current_track_to_worker(room_id, announce=False)
             return
 
         if event_name == "worker_restart_failed":
             if not self._restart_failed_notified:
                 self._restart_failed_notified = True
-                await self.send_message(room_id, "❌ Call worker could not recover. Use !join to reconnect.")
+                await self.send_message(room_id, "❌ Call worker could not recover. Use !join to reconnect.", priority="critical")
             return
 
         if event_name == "worker_heartbeat_timeout":
@@ -594,11 +858,11 @@ class IntegratedBot:
             return
 
         if event_name == "worker_recovering":
-            await self.send_message(room_id, "⚠️ Playback backend stalled. Recovering call worker...")
+            await self.send_message(room_id, "⚠️ Playback backend stalled. Recovering call worker...", priority="critical")
             return
 
         if event_name == "worker_recovered":
-            await self.send_message(room_id, "✅ Call worker recovered")
+            await self.send_message(room_id, "✅ Call worker recovered", priority="critical")
             await self._sync_current_track_to_worker(room_id, announce=False)
             return
 
@@ -607,7 +871,7 @@ class IntegratedBot:
         duration: float,
         room_id: str,
         expected_generation: int,
-        expected_file: Optional[str],
+        expected_source: Optional[str],
     ):
         try:
             total_wait = duration + self.audio_queue.auto_advance_buffer
@@ -619,8 +883,8 @@ class IntegratedBot:
             if expected_generation != self._playback_generation:
                 logger.info("Skipping stale auto-advance timer (generation changed)")
                 return
-            current_file = self.audio_queue.current.get("file") if isinstance(self.audio_queue.current, dict) else None
-            if expected_file and current_file and current_file != expected_file:
+            current_source = self._track_source_ref(self.audio_queue.current)
+            if expected_source and current_source and current_source != expected_source:
                 logger.info("Skipping stale auto-advance timer (track changed)")
                 return
             await self._advance_queue(room_id, from_timer=True)
@@ -670,30 +934,36 @@ class IntegratedBot:
             return
 
         try:
-            should_wait_stop = pre_stop and self.call_worker.state == "playing"
-            if should_wait_stop:
-                await self.call_worker.stop_playback(wait_for_terminal=True, timeout=3.0)
-            await self.call_worker.play(next_track["file"], next_track["title"])
-            self._playback_generation += 1
-            generation = self._playback_generation
-            current_file = next_track.get("file")
+            generation, current_source = await self._play_track_in_worker(next_track, pre_stop=pre_stop)
             self._current_track_started_at = asyncio.get_running_loop().time()
             self._push_play_history(room_id, next_track)
             await self.send_message(room_id, f"▶️ Now playing: {next_track['title']}{loop_indicator}")
             self._worker_playback_task = asyncio.create_task(
-                self._wait_for_worker_playback(room_id, generation, current_file)
+                self._wait_for_worker_playback(room_id, generation, current_source)
             )
         except Exception as exc:
+            logger.error(f"Failed to send track to call worker: {exc}")
+            can_retry_stream = (
+                self.config.STREAM_RETRY_TO_FILE_ON_FAIL
+                and isinstance(next_track, dict)
+                and not next_track.get("file")
+                and isinstance(next_track.get("stream_url"), str)
+            )
+            if can_retry_stream:
+                await self.send_message(room_id, "⚠️ Stream failed. Retrying from cached file...", priority="critical")
+                fallback_ok = await self._retry_stream_track_as_file(room_id, next_track)
+                if fallback_ok:
+                    await self.send_message(room_id, f"▶️ Now playing: {next_track['title']}")
+                    return
             self._current_track_started_at = None
             await self.send_message(room_id, f"❌ Failed to play in call: {exc}")
-            logger.error(f"Failed to send track to call worker: {exc}")
             return
 
         self._arm_auto_advance(
             next_track.get("duration"),
             room_id,
             expected_generation=generation,
-            expected_file=current_file,
+            expected_source=current_source,
         )
 
     async def on_invite(self, room: MatrixRoom, event: InviteMemberEvent):
@@ -707,6 +977,37 @@ class IntegratedBot:
             room.room_id,
             "🎵 Music Bot ready. Use `!help` to see commands.",
         )
+
+    def _register_command_handlers(self):
+        commands = [
+            "!help",
+            "!config",
+            "!defaults",
+            "!join",
+            "!leave",
+            "!play",
+            "!queue",
+            "!nowplaying",
+            "!diag",
+            "!audio",
+            "!normalize",
+            "!fadein",
+            "!volume",
+            "!history",
+            "!save",
+            "!queues",
+            "!deletequeue",
+            "!renamequeue",
+            "!load",
+            "!skip",
+            "!loop",
+            "!stop",
+            "!status",
+        ]
+        for command_name in commands:
+            self._command_handlers[command_name] = (
+                lambda room, args, cmd=command_name: self._handle_command_internal(room, cmd, args)
+            )
 
     async def handle_command(self, room: MatrixRoom, message: str):
         parts = message.strip().split(maxsplit=1)
@@ -739,6 +1040,13 @@ class IntegratedBot:
             "!df": "!defaults",
         }
         command = aliases.get(command, command)
+        handler = self._command_handlers.get(command)
+        if handler is None:
+            await self.send_message(room.room_id, "❓ Unknown command. Use !help", priority="normal")
+            return
+        await handler(room, args)
+
+    async def _handle_command_internal(self, room: MatrixRoom, command: str, args: str):
 
         if command == "!help":
             await self.send_message(room.room_id, self._help_text())
@@ -753,7 +1061,7 @@ class IntegratedBot:
             return
 
         if command == "!join":
-            await self._join_call_for_room(room.room_id)
+            await self._join_call_for_room(room.room_id, announce_if_already_joined=True)
             return
 
         if command == "!leave":
@@ -774,8 +1082,6 @@ class IntegratedBot:
                 return
 
             async with self._play_request_lock:
-                if not await self._join_call_for_room(room.room_id):
-                    return
                 self._cancel_background_load()
 
                 playlist_ok = False
@@ -785,6 +1091,14 @@ class IntegratedBot:
                     if resolved_ok and isinstance(resolved, dict) and resolved.get("is_playlist"):
                         playlist_ok = True
                         playlist_info = resolved
+
+                if not playlist_ok:
+                    streamed = await self._try_stream_first_idle_play(room.room_id, args)
+                    if streamed:
+                        return
+
+                if not await self._join_call_for_room(room.room_id):
+                    return
 
                 if playlist_ok and isinstance(playlist_info, dict):
                     entries = playlist_info.get("entries")
@@ -822,16 +1136,7 @@ class IntegratedBot:
 
                     await self.send_message(room.room_id, f"📥 Loading playlist `{playlist_name}`...")
 
-                    first_item = None
-                    first_index = -1
-                    failures = 0
-                    for index, source_url in enumerate(filtered_sources):
-                        success, result = await self.audio_queue.download_audio(source_url)
-                        if success and isinstance(result, dict):
-                            first_item = result
-                            first_index = index
-                            break
-                        failures += 1
+                    first_item, first_index, failures = await self._download_first_available_source(filtered_sources)
 
                     if first_item is None:
                         await self.send_message(room.room_id, f"❌ Could not load any tracks from `{playlist_name}`")
@@ -853,7 +1158,13 @@ class IntegratedBot:
                     remaining_sources = [src for idx, src in enumerate(filtered_sources) if idx != first_index]
                     if remaining_sources:
                         self._background_load_task = asyncio.create_task(
-                            self._load_remaining_playlist_tracks(room.room_id, playlist_name, remaining_sources)
+                            self._load_remaining_tracks(
+                                room.room_id,
+                                playlist_name,
+                                remaining_sources,
+                                dedupe_existing=True,
+                                source_label="playlist",
+                            )
                         )
 
                     summary = [f"✅ Playlist `{playlist_name}`: added {loaded_count} track"]
@@ -872,8 +1183,8 @@ class IntegratedBot:
 
                 if self.config.SHOW_PROGRESS_MESSAGES:
                     if not self.audio_queue.looks_like_url(args):
-                        asyncio.create_task(self.send_message(room.room_id, f"🔎 Searching: {args}"))
-                    asyncio.create_task(self.send_message(room.room_id, "⬇️ Downloading..."))
+                        asyncio.create_task(self.send_message(room.room_id, f"🔎 Searching: {args}", priority="noisy"))
+                    asyncio.create_task(self.send_message(room.room_id, "⬇️ Downloading...", priority="noisy"))
 
                 success, result = await self.audio_queue.download_audio(args)
                 if not success:
@@ -887,7 +1198,6 @@ class IntegratedBot:
                 audio_file = result["file"]
                 duration = result["duration"]
                 title = result["title"]
-                uploader = result.get("uploader")
                 source_url = result.get("source_url")
 
                 if isinstance(source_url, str) and self.audio_queue.has_source(source_url):
@@ -897,13 +1207,8 @@ class IntegratedBot:
                     )
                     return
 
-                found_line = f"✅ Found: {title}"
-                if uploader:
-                    found_line += f" — {uploader}"
-                if duration is not None:
-                    found_line += f" [{self._format_duration(duration)}]"
-                await self.send_message(room.room_id, found_line)
-
+                queued_message = None
+                should_advance = False
                 async with self._playback_lock:
                     had_current = self.audio_queue.current is not None or self.call_worker.state == "playing"
                     self.audio_queue.add_to_queue(
@@ -939,16 +1244,17 @@ class IntegratedBot:
                         )
                         next_title = self._next_track_title()
                         next_line = f"\nNext: {next_title}" if next_title else ""
-                        await self.send_message(
-                            room.room_id,
-                            (
-                                f"✅ Queued: {title}\n"
-                                f"Position: {len(self.audio_queue.queue)}"
-                                f"{eta_line}{next_line}"
-                            ),
+                        queued_message = (
+                            f"✅ Queued: {title}\n"
+                            f"Position: {len(self.audio_queue.queue)}"
+                            f"{eta_line}{next_line}"
                         )
                     else:
-                        await self._advance_queue(room.room_id, force_next=True)
+                        should_advance = True
+                if queued_message:
+                    await self.send_message(room.room_id, queued_message)
+                if should_advance:
+                    await self._advance_queue(room.room_id, force_next=True)
             return
 
         if command == "!queue":
@@ -1048,7 +1354,9 @@ class IntegratedBot:
                 f"Cache mode: {self.config.AUDIO_CACHE_MODE}\n"
                 f"Cache max: {self._format_bytes(self.config.AUDIO_CACHE_MAX_BYTES)}\n"
                 f"Delete after playback: {'On' if self.config.AUDIO_CACHE_DELETE_AFTER_PLAYBACK else 'Off'}\n"
-                f"Delete on shutdown: {'On' if self.config.AUDIO_CACHE_DELETE_ON_SHUTDOWN else 'Off'}",
+                f"Delete on shutdown: {'On' if self.config.AUDIO_CACHE_DELETE_ON_SHUTDOWN else 'Off'}\n"
+                f"Stream-first idle: {'On' if self.config.STREAM_FIRST_IDLE else 'Off'}\n"
+                f"Stream prefetch current: {'On' if self.config.STREAM_PREFETCH_CURRENT else 'Off'}",
             )
             return
 
@@ -1067,9 +1375,8 @@ class IntegratedBot:
             if not raw:
                 await self.send_message(room.room_id, "❌ Usage: !fadein <milliseconds>")
                 return
-            try:
-                ms = int(raw)
-            except ValueError:
+            ms = self._parse_int_arg(raw)
+            if ms is None:
                 await self.send_message(room.room_id, "❌ Fade-in must be an integer number of milliseconds")
                 return
             if ms < 0 or ms > 5000:
@@ -1085,9 +1392,8 @@ class IntegratedBot:
             if not raw:
                 await self.send_message(room.room_id, "❌ Usage: !volume <0-200>")
                 return
-            try:
-                value = int(raw)
-            except ValueError:
+            value = self._parse_int_arg(raw)
+            if value is None:
                 await self.send_message(room.room_id, "❌ Volume must be an integer between 0 and 200")
                 return
             if value < 0 or value > 200:
@@ -1229,9 +1535,6 @@ class IntegratedBot:
             return
 
         if command == "!load":
-            if not await self._join_call_for_room(room.room_id):
-                return
-
             name = args.strip()
             if not name:
                 await self.send_message(room.room_id, "❌ Usage: !load <name>")
@@ -1246,13 +1549,14 @@ class IntegratedBot:
                 await self.send_message(room.room_id, f"❌ Saved queue `{name}` is empty")
                 return
 
+            if not await self._join_call_for_room(room.room_id):
+                return
+
             self._cancel_background_load()
             await self.send_message(room.room_id, f"📥 Loading `{name}`...")
 
-            first_item = None
-            first_index = -1
-            failures = 0
             sources: list[str] = []
+            failures = 0
 
             for track in tracks:
                 source_url = track.get("source_url") if isinstance(track, dict) else None
@@ -1261,13 +1565,8 @@ class IntegratedBot:
                     continue
                 sources.append(source_url)
 
-            for index, source_url in enumerate(sources):
-                success, result = await self.audio_queue.download_audio(source_url)
-                if success and isinstance(result, dict):
-                    first_item = result
-                    first_index = index
-                    break
-                failures += 1
+            first_item, first_index, download_failures = await self._download_first_available_source(sources)
+            failures += download_failures
 
             if first_item is None:
                 await self.send_message(room.room_id, f"❌ Could not load any tracks from `{name}`")
@@ -1296,12 +1595,16 @@ class IntegratedBot:
 
                 await self._advance_queue(room.room_id, force_next=True)
 
-            await self.send_message(room.room_id, f"✅ Started: {first_item.get('title', 'track')} ({name})")
-
             remaining_sources = [src for idx, src in enumerate(sources) if idx != first_index]
             if remaining_sources:
                 self._background_load_task = asyncio.create_task(
-                    self._load_remaining_saved_tracks(room.room_id, name, remaining_sources)
+                    self._load_remaining_tracks(
+                        room.room_id,
+                        name,
+                        remaining_sources,
+                        dedupe_existing=False,
+                        source_label="saved queue",
+                    )
                 )
                 await self.send_message(room.room_id, f"ℹ️ Loading {len(remaining_sources)} more...")
             elif failures:
@@ -1316,16 +1619,19 @@ class IntegratedBot:
             if now - self._last_skip_at < self._skip_cooldown_seconds:
                 await self.send_message(room.room_id, "ℹ️ Skip already in progress")
                 return
-            self._last_skip_at = now
 
+            queue_empty = False
             async with self._playback_lock:
                 if not self.audio_queue.current and not self.audio_queue.queue:
-                    await self.send_message(room.room_id, "📭 Queue is empty")
-                    return
-                asyncio.create_task(self.send_message(room.room_id, "⏭️ Skipping..."))
-                self._cancel_worker_playback_wait()
-                await self.call_worker.stop_playback(wait_for_terminal=False)
-                await self._advance_queue(room.room_id, force_next=True, pre_stop=False)
+                    queue_empty = True
+                else:
+                    self._last_skip_at = now
+                    asyncio.create_task(self.send_message(room.room_id, "⏭️ Skipping...", priority="noisy"))
+                    self._cancel_worker_playback_wait()
+                    await self.call_worker.stop_playback(wait_for_terminal=False)
+                    await self._advance_queue(room.room_id, force_next=True, pre_stop=False)
+            if queue_empty:
+                await self.send_message(room.room_id, "📭 Queue is empty")
             return
 
         if command == "!loop":
@@ -1347,7 +1653,7 @@ class IntegratedBot:
                         current["duration"],
                         self._current_room_id,
                         expected_generation=self._playback_generation,
-                        expected_file=current.get("file"),
+                        expected_source=self._track_source_ref(current),
                     )
             return
 
@@ -1399,16 +1705,22 @@ class IntegratedBot:
             await self.send_message(room.room_id, "\n".join(lines))
             return
 
-        await self.send_message(room.room_id, "❓ Unknown command. Use !help")
+        return
 
-    async def send_message(self, room_id: str, text: str, *, html_body: Optional[str] = None):
+    async def send_message(
+        self,
+        room_id: str,
+        text: str,
+        *,
+        html_body: Optional[str] = None,
+        priority: str = "normal",
+    ):
         try:
-            content = {"msgtype": "m.text", "body": text}
-            if self.config.RICH_FORMATTING and html_body:
-                content["format"] = "org.matrix.custom.html"
-                content["formatted_body"] = html_body
-
-            await self.client.room_send(room_id, message_type="m.room.message", content=content)
+            resolved_priority = priority if priority in self._message_priority_map else "normal"
+            if priority == "normal":
+                if text.startswith("❌") or text.startswith("⚠️"):
+                    resolved_priority = "critical"
+            await self._queue_message(room_id, text, html_body=html_body, priority=resolved_priority)
         except Exception as exc:
             logger.error(f"Error sending message: {exc}")
 
@@ -1433,6 +1745,7 @@ class IntegratedBot:
 
         await self.client.sync(timeout=30000, full_state=True)
         self.first_sync_done = True
+        self._start_message_dispatcher()
         self._ensure_advance_watchdog()
         logger.info("Bot ready")
 
@@ -1444,6 +1757,7 @@ class IntegratedBot:
             self._cancel_worker_playback_wait()
             self._cancel_background_load()
             self.audio_queue.cleanup_on_shutdown()
+            await self._stop_message_dispatcher()
             await self.call_worker.stop()
             await self.client.close()
 

@@ -26,6 +26,9 @@ class AudioQueue:
         cache_max_bytes: int = 1_073_741_824,
         cache_delete_after_playback: bool = True,
         cache_delete_on_shutdown: bool = True,
+        search_mode: str = "fast",
+        search_timeout_seconds: float = 8.0,
+        extractor_retries: int = 1,
     ):
         self.audio_dir = audio_dir
         self.audio_dir.mkdir(parents=True, exist_ok=True)
@@ -40,9 +43,15 @@ class AudioQueue:
         self.cache_max_bytes = max(0, int(cache_max_bytes))
         self.cache_delete_after_playback = bool(cache_delete_after_playback)
         self.cache_delete_on_shutdown = bool(cache_delete_on_shutdown)
+        self.search_mode = str(search_mode or "fast").strip().lower()
+        if self.search_mode not in {"fast", "accurate"}:
+            self.search_mode = "fast"
+        self.search_timeout_seconds = max(0.0, float(search_timeout_seconds))
+        self.extractor_retries = max(0, int(extractor_retries))
 
         # Cache shape: {url: {"file": str, "music_duration": Optional[float]}}
         self.download_cache = {}
+        self.search_cache: dict[str, dict] = {}
         self._enforce_size_limit()
 
     def _in_use_files(self) -> set[str]:
@@ -239,12 +248,11 @@ class AudioQueue:
     async def _resolve_media_info(self, dlp_cmd: str, query_or_url: str) -> tuple[bool, dict | str]:
         is_url = self.looks_like_url(query_or_url)
         target = query_or_url if is_url else f"ytsearch1:{query_or_url}"
-        code, stdout, stderr = await self._run_command(
-            dlp_cmd,
-            "--no-playlist",
-            "--dump-single-json",
-            target,
-        )
+        cmd = [dlp_cmd, "--no-playlist", "--dump-single-json", "--extractor-retries", str(self.extractor_retries)]
+        if self.search_mode == "fast":
+            cmd.extend(["--no-warnings", "--socket-timeout", str(max(3.0, self.search_timeout_seconds))])
+        cmd.append(target)
+        code, stdout, stderr = await self._run_command(*cmd)
         if code != 0:
             return False, (stderr.strip() or "Failed to resolve media info")
 
@@ -273,14 +281,73 @@ class AudioQueue:
         title = self.normalize_title(str(raw_title))
         duration = entry.get("duration")
         uploader = entry.get("uploader") or entry.get("channel")
+        stream_url = entry.get("url")
+        if not isinstance(stream_url, str) or not stream_url.strip():
+            stream_url = None
 
         out = {
             "source_url": source_url,
             "title": title,
             "duration": float(duration) if isinstance(duration, (int, float)) else None,
             "uploader": uploader,
+            "stream_url": stream_url,
         }
         return True, out
+
+    async def resolve_stream_source(self, query_or_url: str) -> tuple[bool, dict | str]:
+        query_or_url = query_or_url.strip()
+        if not query_or_url:
+            return False, "Empty query"
+        query_or_url = self.normalize_media_url(query_or_url)
+
+        dlp_cmd = "yt-dlp" if shutil.which("yt-dlp") else "youtube-dlp"
+        if not shutil.which(dlp_cmd):
+            return False, "yt-dlp (or youtube-dlp) is not installed"
+
+        target = query_or_url if self.looks_like_url(query_or_url) else f"ytsearch1:{query_or_url}"
+        metadata_task = asyncio.create_task(self._resolve_media_info(dlp_cmd, query_or_url))
+        stream_task = asyncio.create_task(self._resolve_direct_stream_url(dlp_cmd, target))
+        (resolved_ok, resolved), (stream_ok, stream_url_or_error) = await asyncio.gather(metadata_task, stream_task)
+
+        if not stream_ok:
+            return False, stream_url_or_error
+
+        stream_url = stream_url_or_error if isinstance(stream_url_or_error, str) else None
+        if not isinstance(stream_url, str) or not stream_url:
+            return False, "No stream source available"
+
+        metadata: dict = {}
+        if resolved_ok and isinstance(resolved, dict):
+            metadata = resolved
+
+        return True, {
+            "stream_url": stream_url,
+            "source_url": metadata.get("source_url") or query_or_url,
+            "title": metadata.get("title") or os.path.basename(query_or_url) or "track",
+            "duration": metadata.get("duration"),
+            "uploader": metadata.get("uploader"),
+        }
+
+    async def _resolve_direct_stream_url(self, dlp_cmd: str, target: str) -> tuple[bool, str]:
+        cmd = [
+            dlp_cmd,
+            "--no-playlist",
+            "-f",
+            "bestaudio",
+            "--get-url",
+            "--extractor-retries",
+            str(self.extractor_retries),
+        ]
+        if self.search_mode == "fast":
+            cmd.extend(["--no-warnings", "--socket-timeout", str(max(3.0, self.search_timeout_seconds))])
+        cmd.append(target)
+        code, stdout, stderr = await self._run_command(*cmd)
+        if code != 0:
+            return False, (stderr.strip() or "Failed to resolve stream URL")
+        lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+        if not lines:
+            return False, "No direct stream URL returned"
+        return True, lines[0]
 
     async def resolve_playlist_entries(self, url: str) -> tuple[bool, dict | str]:
         """Resolve playlist metadata and entry URLs for a playlist URL.
@@ -303,12 +370,17 @@ class AudioQueue:
         if not shutil.which(dlp_cmd):
             return False, "yt-dlp (or youtube-dlp) is not installed"
 
-        code, stdout, stderr = await self._run_command(
+        cmd = [
             dlp_cmd,
             "--flat-playlist",
             "--dump-single-json",
-            candidate,
-        )
+            "--extractor-retries",
+            str(self.extractor_retries),
+        ]
+        if self.search_mode == "fast":
+            cmd.extend(["--no-warnings", "--lazy-playlist", "--socket-timeout", str(max(3.0, self.search_timeout_seconds))])
+        cmd.append(candidate)
+        code, stdout, stderr = await self._run_command(*cmd)
         if code != 0:
             return False, (stderr.strip() or "Failed to resolve playlist metadata")
 
@@ -376,11 +448,21 @@ class AudioQueue:
         if not shutil.which(dlp_cmd):
             return False, "yt-dlp (or youtube-dlp) is not installed"
 
-        resolved_ok, resolved = await self._resolve_media_info(dlp_cmd, query_or_url)
+        query_key = query_or_url.casefold()
+        is_direct_url = self.looks_like_url(query_or_url)
+        resolved: dict | str
+        if self.search_mode == "fast" and not is_direct_url and query_key in self.search_cache:
+            resolved_ok = True
+            resolved = dict(self.search_cache[query_key])
+        else:
+            resolved_ok, resolved = await self._resolve_media_info(dlp_cmd, query_or_url)
         if not resolved_ok:
             return False, resolved
         if not isinstance(resolved, dict):
             return False, "Resolved metadata is invalid"
+
+        if self.search_mode == "fast" and not is_direct_url:
+            self.search_cache[query_key] = dict(resolved)
 
         source_url = resolved["source_url"]
 
@@ -424,10 +506,14 @@ class AudioQueue:
             "wav",
             "--audio-quality",
             "0",
+            "--extractor-retries",
+            str(self.extractor_retries),
             "-o",
             temp_output,
             source_url,
         ]
+        if self.search_mode == "fast":
+            cmd[1:1] = ["--no-warnings", "--socket-timeout", str(max(3.0, self.search_timeout_seconds))]
 
         try:
             process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)

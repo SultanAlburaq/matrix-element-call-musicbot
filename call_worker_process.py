@@ -124,6 +124,14 @@ class CallWorkerProcess:
             payload["title"] = title
         await self._send_command(payload)
 
+    async def play_stream(self, stream_url: str, title: Optional[str] = None):
+        if not self.running:
+            raise RuntimeError("Call worker is not running")
+        payload = {"type": "play", "url": stream_url}
+        if title:
+            payload["title"] = title
+        await self._send_command(payload)
+
     async def stop_playback(self, wait_for_terminal: bool = False, timeout: float = 8.0) -> bool:
         if not self.running:
             return True
