@@ -65,7 +65,7 @@ Long-term fix:
 - Public hosted bot for other communities
 - Add encrypted call support
 - Add sharding/multi-room playback support so music can run in multiple rooms at once
-- Playlist support
+
 
 ## Contributing
 
