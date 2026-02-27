@@ -7,6 +7,7 @@ Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`
 - Discord-style chat command workflow in Matrix rooms
 - Joins Element Call and plays audio directly in call
 - URL or search-based playback with queue and ETA
+- Playlists supported
 - Saved queue presets (`save`, `load`, `rename`, `delete`)
 - Playback history and now-playing visibility
 - Audio controls (volume, fade-in, normalization)
@@ -59,21 +60,6 @@ membership_mode = "legacy"
 Long-term fix:
 
 - Upgrade your homeserver/call stack to support MatrixRTC sticky events, then use `matrix2_auto`.
-
-## Roadmap (Not Concrete)
-
-- Public hosted bot for other communities
-- Add encrypted call support
-- Add sharding/multi-room playback support so music can run in multiple rooms at once
-
-
-## Contributing
-
-Pull requests are appreciated. If you want to help, open a PR.
-
-## Contact
-
-- `contact@alburaqsultan.com`
 
 ## Demo
 
