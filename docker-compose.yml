@@ -1,6 +1,6 @@
 services:
   musicbot:
-    build: .
+    image: ghcr.io/sultanalburaq/matrix-element-call-musicbot:latest
     container_name: musicbot
     restart: unless-stopped
     environment:
