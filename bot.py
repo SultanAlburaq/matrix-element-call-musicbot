@@ -47,6 +47,8 @@ class IntegratedBot:
             search_mode=config.SEARCH_MODE,
             search_timeout_seconds=config.SEARCH_TIMEOUT_SECONDS,
             extractor_retries=config.EXTRACTOR_RETRIES,
+            audio_format=config.AUDIO_FORMAT,
+            audio_quality=config.AUDIO_QUALITY,
         )
 
         self._auto_advance_task: Optional[asyncio.Task] = None
@@ -311,6 +313,8 @@ class IntegratedBot:
             "⚙️ Active config",
             f"Config file: {self.config.config_file}",
             f"Audio dir: {self.config.AUDIO_DIR}",
+            f"Audio format: {self.config.AUDIO_FORMAT}",
+            f"Audio quality: {self.config.AUDIO_QUALITY}",
             f"Saved queues: {self.config.SAVED_QUEUES_FILE}",
             f"Pre-roll silence: {self.config.PREROLL_SILENCE:.1f}s",
             f"Auto-advance buffer: {self.config.AUTO_ADVANCE_BUFFER:.1f}s",

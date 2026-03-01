@@ -29,6 +29,8 @@ class AudioQueue:
         search_mode: str = "fast",
         search_timeout_seconds: float = 8.0,
         extractor_retries: int = 1,
+        audio_format: str = "wav",
+        audio_quality: str = "best",
     ):
         self.audio_dir = audio_dir
         self.audio_dir.mkdir(parents=True, exist_ok=True)
@@ -48,6 +50,12 @@ class AudioQueue:
             self.search_mode = "fast"
         self.search_timeout_seconds = max(0.0, float(search_timeout_seconds))
         self.extractor_retries = max(0, int(extractor_retries))
+        self.audio_format = str(audio_format or "wav").strip().lower()
+        if self.audio_format not in {"wav", "ogg"}:
+            self.audio_format = "wav"
+        self.audio_quality = str(audio_quality or "best").strip().lower()
+        if self.audio_quality not in {"best", "medium", "worst"}:
+            self.audio_quality = "best"
 
         # Cache shape: {url: {"file": str, "music_duration": Optional[float]}}
         self.download_cache = {}
@@ -108,7 +116,8 @@ class AudioQueue:
 
         files: list[tuple[Path, os.stat_result]] = []
         total_bytes = 0
-        for path in self.audio_dir.glob("*.wav"):
+        file_pattern = f"*{self.get_audio_file_extension()}"
+        for path in self.audio_dir.glob(file_pattern):
             try:
                 stat = path.stat()
             except OSError:
@@ -161,39 +170,100 @@ class AudioQueue:
         if self.cache_mode != "always_delete" or not self.cache_delete_on_shutdown:
             return
 
-        for path in self.audio_dir.glob("*.wav"):
+        file_pattern = f"*{self.get_audio_file_extension()}"
+        for path in self.audio_dir.glob(file_pattern):
             self._delete_file(str(path))
 
     @staticmethod
     def normalize_title(title: str) -> str:
         return " ".join(title.split())
 
+    def get_audio_file_extension(self) -> str:
+        """Get the file extension for the configured audio format."""
+        return f".{self.audio_format}"
+
+    def get_audio_format_for_ytdlp(self) -> str:
+        """Get the yt-dlp audio format flag value."""
+        if self.audio_format == "ogg":
+            return "vorbis"
+        else:
+            return self.audio_format
+
+    def get_audio_quality_for_ytdlp(self) -> str:
+        """Get the yt-dlp audio quality value (0=best, 5=medium, 10=worst)."""
+        quality_map = {
+            "best": "0",
+            "medium": "5",
+            "worst": "10",
+        }
+        return quality_map.get(self.audio_quality, "0")
+
     @staticmethod
-    def get_audio_duration(wav_file: str) -> Optional[float]:
-        """Get duration of WAV file in seconds."""
+    async def get_audio_duration_async(audio_file: str) -> Optional[float]:
+        """Get duration of audio file using ffprobe (format-agnostic)."""
         try:
-            with wave.open(wav_file, "rb") as wav_file_handle:
-                frames = wav_file_handle.getnframes()
-                rate = wav_file_handle.getframerate()
-                return frames / float(rate)
+            cmd = [
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                audio_file,
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                logger.error(f"ffprobe error for {audio_file}: {stderr.decode().strip()}")
+                return None
+
+            duration_str = stdout.decode().strip()
+            return float(duration_str) if duration_str else None
         except Exception as exc:
-            logger.error(f"Error getting duration: {exc}")
+            logger.error(f"Error getting duration with ffprobe: {exc}")
             return None
 
     @staticmethod
-    def add_silence_to_wav(input_file: str, output_file: str, silence_duration: float) -> bool:
-        """Prepend silence to a WAV file."""
+    async def add_silence_to_audio_async(
+        input_file: str,
+        output_file: str,
+        silence_duration: float,
+        audio_format: str = "wav"
+    ) -> bool:
+        """Prepend silence to an audio file using ffmpeg (format-agnostic)."""
         try:
-            with wave.open(input_file, "rb") as input_wav:
-                params = input_wav.getparams()
-                original_frames = input_wav.readframes(params.nframes)
+            # Use adelay filter to prepend silence
+            silence_filter = f"adelay={int(silence_duration * 1000)}|{int(silence_duration * 1000)}"
 
-            silence_frames_count = int(params.framerate * silence_duration)
-            silence_data = b"\x00" * (silence_frames_count * params.nchannels * params.sampwidth)
+            # Map format to ffmpeg audio codec
+            audio_codec_map = {
+                "wav": "pcm_s16le",
+                "ogg": "libvorbis",
+            }
+            audio_codec = audio_codec_map.get(audio_format.lower(), "pcm_s16le")
 
-            with wave.open(output_file, "wb") as output_wav:
-                output_wav.setparams(params)
-                output_wav.writeframes(silence_data + original_frames)
+            cmd = [
+                "ffmpeg",
+                "-i", input_file,
+                "-af", silence_filter,
+                "-c:a", audio_codec,
+                "-y",  # Overwrite output file
+                output_file,
+            ]
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                logger.error(f"ffmpeg silence addition failed: {stderr.decode().strip()}")
+                return False
 
             logger.info(f"Added {silence_duration:.1f}s pre-roll silence to {output_file}")
             return True
@@ -495,17 +565,18 @@ class AudioQueue:
             }
 
         url_hash = hashlib.md5(source_url.encode(), usedforsecurity=False).hexdigest()[:8]
+        file_ext = self.get_audio_file_extension()
         temp_output = str(self.audio_dir / f"{url_hash}_temp.%(ext)s")
-        temp_wav_file = self.audio_dir / f"{url_hash}_temp.wav"
-        final_output = str(self.audio_dir / f"{url_hash}.wav")
+        temp_audio_file = self.audio_dir / f"{url_hash}_temp{file_ext}"
+        final_output = str(self.audio_dir / f"{url_hash}{file_ext}")
 
         cmd = [
             dlp_cmd,
             "-x",
             "--audio-format",
-            "wav",
+            self.get_audio_format_for_ytdlp(),
             "--audio-quality",
-            "0",
+            self.get_audio_quality_for_ytdlp(),
             "--extractor-retries",
             str(self.extractor_retries),
             "-o",
@@ -524,21 +595,26 @@ class AudioQueue:
                 logger.error(f"yt-dlp failed: {error_msg}")
                 return False, error_msg
 
-            if not temp_wav_file.exists():
+            if not temp_audio_file.exists():
                 return False, "File not found after download"
 
-            music_duration = self.get_audio_duration(str(temp_wav_file))
+            music_duration = await self.get_audio_duration_async(str(temp_audio_file))
 
             if self.preroll_silence > 0:
-                silence_ok = self.add_silence_to_wav(str(temp_wav_file), final_output, self.preroll_silence)
+                silence_ok = await self.add_silence_to_audio_async(
+                    str(temp_audio_file),
+                    final_output,
+                    self.preroll_silence,
+                    self.audio_format
+                )
                 if not silence_ok:
                     logger.warning("Failed to add pre-roll silence, using original file")
-                    temp_wav_file.rename(final_output)
+                    temp_audio_file.rename(final_output)
             else:
-                temp_wav_file.rename(final_output)
+                temp_audio_file.rename(final_output)
 
-            if temp_wav_file.exists():
-                temp_wav_file.unlink()
+            if temp_audio_file.exists():
+                temp_audio_file.unlink()
 
             non_cacheable = False
             if self.cache_mode == "size_lru" and self.cache_max_bytes > 0:

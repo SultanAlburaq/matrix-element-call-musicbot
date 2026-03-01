@@ -31,6 +31,8 @@ class Config:
         "audio.stream_first_idle": True,
         "audio.stream_prefetch_current": True,
         "audio.stream_retry_to_file_on_fail": True,
+        "audio.audio_format": "wav",
+        "audio.audio_quality": "best",
         "worker.max_restart_attempts": 3,
         "worker.heartbeat_interval_seconds": 10.0,
         "worker.skip_cooldown_seconds": 1.0,
@@ -185,6 +187,20 @@ class Config:
             "stream_retry_to_file_on_fail",
             self.DEFAULTS["audio.stream_retry_to_file_on_fail"],
         )
+        self.AUDIO_FORMAT = (
+            self._get_str("AUDIO_FORMAT", "audio", "audio_format", default=self.DEFAULTS["audio.audio_format"])
+            or self.DEFAULTS["audio.audio_format"]
+        )
+        self.AUDIO_FORMAT = self.AUDIO_FORMAT.strip().lower()
+        if self.AUDIO_FORMAT not in {"wav", "ogg"}:
+            raise ValueError("AUDIO_FORMAT/audio.audio_format must be one of: wav, ogg")
+        self.AUDIO_QUALITY = (
+            self._get_str("AUDIO_QUALITY", "audio", "audio_quality", default=self.DEFAULTS["audio.audio_quality"])
+            or self.DEFAULTS["audio.audio_quality"]
+        )
+        self.AUDIO_QUALITY = self.AUDIO_QUALITY.strip().lower()
+        if self.AUDIO_QUALITY not in {"best", "medium", "worst"}:
+            raise ValueError("AUDIO_QUALITY/audio.audio_quality must be one of: best, medium, worst")
 
         self.WORKER_LOG_MAX_BYTES = self._get_nonnegative_int(
             "WORKER_LOG_MAX_BYTES", "worker", "log_max_bytes", self.DEFAULTS["worker.log_max_bytes"]
@@ -387,6 +403,8 @@ class Config:
                 "audio.stream_retry_to_file_on_fail = "
                 f"{str(cls.DEFAULTS['audio.stream_retry_to_file_on_fail']).lower()}"
             ),
+            "audio.audio_format = wav | ogg",
+            "audio.audio_quality = best | medium | worst",
             f"worker.max_restart_attempts = {cls.DEFAULTS['worker.max_restart_attempts']}",
             f"worker.heartbeat_interval_seconds = {cls.DEFAULTS['worker.heartbeat_interval_seconds']}",
             f"worker.skip_cooldown_seconds = {cls.DEFAULTS['worker.skip_cooldown_seconds']}",

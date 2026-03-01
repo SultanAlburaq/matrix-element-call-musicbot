@@ -42,6 +42,8 @@ preroll_silence = 1.0
 normalize_audio = false
 fade_in_ms = 120
 volume_percent = 100 # 0-200
+audio_format = "wav"  # wav | ogg
+audio_quality = "best"  # best | medium | worst
 
 [worker]
 max_restart_attempts = 3
