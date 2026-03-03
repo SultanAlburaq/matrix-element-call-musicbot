@@ -5,6 +5,7 @@ from typing import Any, Optional
 
 
 MIN_AUDIO_CACHE_MAX_BYTES = 200 * 1024 * 1024
+SUPPORTED_AUDIO_DOWNLOAD_FORMATS = {"wav", "mp3", "ogg", "m4a", "opus"}
 
 
 class Config:
@@ -28,6 +29,7 @@ class Config:
         "audio.search_mode": "fast",
         "audio.search_timeout_seconds": 8.0,
         "audio.extractor_retries": 1,
+        "audio.download_format": "wav",
         "audio.stream_first_idle": True,
         "audio.stream_prefetch_current": True,
         "audio.stream_retry_to_file_on_fail": True,
@@ -167,6 +169,21 @@ class Config:
             "extractor_retries",
             self.DEFAULTS["audio.extractor_retries"],
         )
+        self.AUDIO_DOWNLOAD_FORMAT = (
+            self._get_str(
+                "AUDIO_DOWNLOAD_FORMAT",
+                "audio",
+                "download_format",
+                default=self.DEFAULTS["audio.download_format"],
+            )
+            or self.DEFAULTS["audio.download_format"]
+        )
+        self.AUDIO_DOWNLOAD_FORMAT = self.AUDIO_DOWNLOAD_FORMAT.strip().lower()
+        if self.AUDIO_DOWNLOAD_FORMAT not in SUPPORTED_AUDIO_DOWNLOAD_FORMATS:
+            allowed = ", ".join(sorted(SUPPORTED_AUDIO_DOWNLOAD_FORMATS))
+            raise ValueError(
+                "AUDIO_DOWNLOAD_FORMAT/audio.download_format must be one of: " + allowed
+            )
         self.STREAM_FIRST_IDLE = self._get_bool(
             "STREAM_FIRST_IDLE",
             "audio",
@@ -381,6 +398,7 @@ class Config:
             "audio.search_mode = fast | accurate",
             f"audio.search_timeout_seconds = {cls.DEFAULTS['audio.search_timeout_seconds']}",
             f"audio.extractor_retries = {cls.DEFAULTS['audio.extractor_retries']}",
+            "audio.download_format = wav | mp3 | ogg | m4a | opus",
             f"audio.stream_first_idle = {str(cls.DEFAULTS['audio.stream_first_idle']).lower()}",
             f"audio.stream_prefetch_current = {str(cls.DEFAULTS['audio.stream_prefetch_current']).lower()}",
             (

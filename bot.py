@@ -47,6 +47,7 @@ class IntegratedBot:
             search_mode=config.SEARCH_MODE,
             search_timeout_seconds=config.SEARCH_TIMEOUT_SECONDS,
             extractor_retries=config.EXTRACTOR_RETRIES,
+            download_format=config.AUDIO_DOWNLOAD_FORMAT,
         )
 
         self._auto_advance_task: Optional[asyncio.Task] = None
@@ -324,6 +325,7 @@ class IntegratedBot:
             f"Search mode: {self.config.SEARCH_MODE}",
             f"Search timeout: {self.config.SEARCH_TIMEOUT_SECONDS:.1f}s",
             f"Extractor retries: {self.config.EXTRACTOR_RETRIES}",
+            f"Download format: {self.config.AUDIO_DOWNLOAD_FORMAT}",
             f"Stream first when idle: {'On' if self.config.STREAM_FIRST_IDLE else 'Off'}",
             f"Stream prefetch current: {'On' if self.config.STREAM_PREFETCH_CURRENT else 'Off'}",
             (
@@ -1355,6 +1357,7 @@ class IntegratedBot:
                 f"Cache max: {self._format_bytes(self.config.AUDIO_CACHE_MAX_BYTES)}\n"
                 f"Delete after playback: {'On' if self.config.AUDIO_CACHE_DELETE_AFTER_PLAYBACK else 'Off'}\n"
                 f"Delete on shutdown: {'On' if self.config.AUDIO_CACHE_DELETE_ON_SHUTDOWN else 'Off'}\n"
+                f"Download format: {self.config.AUDIO_DOWNLOAD_FORMAT}\n"
                 f"Stream-first idle: {'On' if self.config.STREAM_FIRST_IDLE else 'Off'}\n"
                 f"Stream prefetch current: {'On' if self.config.STREAM_PREFETCH_CURRENT else 'Off'}",
             )

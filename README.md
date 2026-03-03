@@ -10,6 +10,7 @@ Discord-style music bot UX for Matrix: chat commands (`!play`, `!queue`, `!skip`
 - Saved queue presets (`save`, `load`, `rename`, `delete`)
 - Playback history and now-playing visibility
 - Audio controls (volume, fade-in, normalization)
+- Configurable download format (`wav`, `mp3`, `ogg`, `m4a`, `opus`)
 - Built-in diagnostics and runtime status commands
 - Quiet-mode messaging defaults for less chat noise during playback
 - Fast search defaults for quicker `!play` query resolution

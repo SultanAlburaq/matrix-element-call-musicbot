@@ -33,6 +33,7 @@ cache_delete_on_shutdown = true
 search_mode = "fast" # fast | accurate
 search_timeout_seconds = 8.0
 extractor_retries = 1
+download_format = "wav" # wav | mp3 | ogg(vorbis) | m4a | opus
 stream_first_idle = true
 stream_prefetch_current = true
 stream_retry_to_file_on_fail = true
