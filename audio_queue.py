@@ -39,6 +39,7 @@ class AudioQueue:
         search_timeout_seconds: float = 8.0,
         extractor_retries: int = 1,
         download_format: str = "wav",
+        audio_quality: str = "best",
     ):
         self.audio_dir = audio_dir
         self.audio_dir.mkdir(parents=True, exist_ok=True)
@@ -62,6 +63,9 @@ class AudioQueue:
         if self.download_format not in {"wav", "mp3", "ogg", "m4a", "opus"}:
             self.download_format = "wav"
         self.ytdlp_audio_format = YTDLP_AUDIO_FORMAT_MAP[self.download_format]
+        self.audio_quality = str(audio_quality or "best").strip().lower()
+        if self.audio_quality not in {"best", "medium", "worst"}:
+            self.audio_quality = "best"
 
         # Cache shape: {url: {"file": str, "music_duration": Optional[float]}}
         self.download_cache = {}
@@ -200,6 +204,14 @@ class AudioQueue:
     @staticmethod
     def normalize_title(title: str) -> str:
         return " ".join(title.split())
+
+    def get_audio_quality_for_ytdlp(self) -> str:
+        quality_map = {
+            "best": "0",
+            "medium": "5",
+            "worst": "10",
+        }
+        return quality_map.get(self.audio_quality, "0")
 
     @staticmethod
     def get_audio_duration(wav_file: str) -> Optional[float]:
@@ -584,7 +596,7 @@ class AudioQueue:
             "--audio-format",
             self.ytdlp_audio_format,
             "--audio-quality",
-            "0",
+            self.get_audio_quality_for_ytdlp(),
             "--extractor-retries",
             str(self.extractor_retries),
             "-o",
@@ -595,9 +607,10 @@ class AudioQueue:
             cmd[1:1] = ["--no-warnings", "--socket-timeout", str(max(3.0, self.search_timeout_seconds))]
 
         logger.info(
-            "Audio download format selected: %s (yt-dlp=%s)",
+            "Audio download selected: format=%s (yt-dlp=%s), quality=%s",
             self.download_format,
             self.ytdlp_audio_format,
+            self.audio_quality,
         )
 
         try:

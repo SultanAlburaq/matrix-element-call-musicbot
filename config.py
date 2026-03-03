@@ -30,6 +30,7 @@ class Config:
         "audio.search_timeout_seconds": 8.0,
         "audio.extractor_retries": 1,
         "audio.download_format": "wav",
+        "audio.audio_quality": "best",
         "audio.stream_first_idle": True,
         "audio.stream_prefetch_current": True,
         "audio.stream_retry_to_file_on_fail": True,
@@ -184,6 +185,13 @@ class Config:
             raise ValueError(
                 "AUDIO_DOWNLOAD_FORMAT/audio.download_format must be one of: " + allowed
             )
+        self.AUDIO_QUALITY = (
+            self._get_str("AUDIO_QUALITY", "audio", "audio_quality", default=self.DEFAULTS["audio.audio_quality"])
+            or self.DEFAULTS["audio.audio_quality"]
+        )
+        self.AUDIO_QUALITY = self.AUDIO_QUALITY.strip().lower()
+        if self.AUDIO_QUALITY not in {"best", "medium", "worst"}:
+            raise ValueError("AUDIO_QUALITY/audio.audio_quality must be one of: best, medium, worst")
         self.STREAM_FIRST_IDLE = self._get_bool(
             "STREAM_FIRST_IDLE",
             "audio",
@@ -399,6 +407,7 @@ class Config:
             f"audio.search_timeout_seconds = {cls.DEFAULTS['audio.search_timeout_seconds']}",
             f"audio.extractor_retries = {cls.DEFAULTS['audio.extractor_retries']}",
             "audio.download_format = wav | mp3 | ogg | m4a | opus",
+            "audio.audio_quality = best | medium | worst",
             f"audio.stream_first_idle = {str(cls.DEFAULTS['audio.stream_first_idle']).lower()}",
             f"audio.stream_prefetch_current = {str(cls.DEFAULTS['audio.stream_prefetch_current']).lower()}",
             (
