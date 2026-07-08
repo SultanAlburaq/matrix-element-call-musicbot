@@ -286,7 +286,7 @@ class IntegratedBot:
             "!join (!j) - join Element Call in this room\n"
             "!leave (!lv) - leave current Element Call\n"
             "!play (!p) <url-or-query> - add track and auto-join call if needed\n"
-            "!playf (!pf) <file-or-folder> [-shuffle] - play local file/all files from folder from music directory\n"
+            "!playf (!pf) <file-or-folder> [-shuffle] - play local file or folder from music\n"
             "!queue (!q) - show queue with ETA\n"
             "!nowplaying (!np) - show current track\n"
             "!skip (!s) - skip current track\n"
