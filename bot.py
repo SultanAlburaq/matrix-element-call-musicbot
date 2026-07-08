@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+import random
 from typing import Awaitable, Callable, Optional
 
 from nio import AsyncClient, InviteMemberEvent, MatrixRoom, RoomMessageText
