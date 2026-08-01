@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import time
+import random
 from typing import Awaitable, Callable, Optional
 
 from nio import AsyncClient, InviteMemberEvent, MatrixRoom, RoomMessageText
@@ -286,6 +287,7 @@ class IntegratedBot:
             "!join (!j) - join Element Call in this room\n"
             "!leave (!lv) - leave current Element Call\n"
             "!play (!p) <url-or-query> - add track and auto-join call if needed\n"
+            "!playf (!pf) <file-or-folder> [-shuffle] - play local file or folder from music\n"
             "!queue (!q) - show queue with ETA\n"
             "!nowplaying (!np) - show current track\n"
             "!skip (!s) - skip current track\n"
@@ -991,6 +993,7 @@ class IntegratedBot:
             "!join",
             "!leave",
             "!play",
+            "!playf",
             "!queue",
             "!nowplaying",
             "!diag",
@@ -1024,6 +1027,7 @@ class IntegratedBot:
             "!j": "!join",
             "!lv": "!leave",
             "!p": "!play",
+            "!pf": "!playf",
             "!q": "!queue",
             "!np": "!nowplaying",
             "!d": "!diag",
@@ -1261,6 +1265,122 @@ class IntegratedBot:
                 if should_advance:
                     await self._advance_queue(room.room_id, force_next=True)
             return
+
+
+        if command == "!playf":
+                if not args:
+                        await self.send_message(room.room_id, "❌ Usage: !playf <file-or-folder> [-shuffle]")
+                        return
+
+                shuffle_enabled = False
+                playf_args = args.split()
+
+                if "-shuffle" in playf_args:
+                        shuffle_enabled = True
+                        playf_args.remove("-shuffle")
+
+                if not playf_args:
+                        await self.send_message(room.room_id, "❌ Missing file or folder name")
+                        return
+
+                playf_path = " ".join(playf_args)
+
+                music_dir = Path(__file__).parent / "music"
+                target = (music_dir / playf_path).resolve()
+
+                # security: prevent escaping music dir
+                try:
+                        target.relative_to(music_dir.resolve())
+                except ValueError:
+                        await self.send_message(room.room_id, "❌ Invalid path")
+                        return
+
+                if not target.exists():
+                        await self.send_message(room.room_id, "❌ Not found")
+                        return
+
+                # ─────────────────────────────────────
+                # CASE 1: folder = playlist
+                # ─────────────────────────────────────
+                if target.is_dir():
+                        exts = {".mp3", ".flac", ".ogg", ".wav", ".m4a", ".opus"}
+
+                        files = sorted(
+                                [p for p in target.rglob("*") if p.suffix.lower() in exts and p.is_file()]
+                        )
+
+                        if shuffle_enabled:
+                                random.shuffle(files)
+
+                        if not files:
+                                await self.send_message(room.room_id, "❌ No audio files in folder")
+                                return
+
+                        if not await self._join_call_for_room(room.room_id):
+                                return
+
+                        async with self._playback_lock:
+                                had_current = (
+                                        self.audio_queue.current is not None
+                                        or self.call_worker.state == "playing"
+                                )
+
+                                for f in files:
+                                        duration = self.audio_queue.get_audio_duration(str(f))
+
+                                        self.audio_queue.add_to_queue(
+                                                str(f),
+                                                title=f.stem,
+                                                duration=duration,
+                                                source_url=f"local:{f.relative_to(music_dir)}",
+                                                non_cacheable=True,
+                                        )
+
+                                if not had_current:
+                                        await self._advance_queue(room.room_id, force_next=True)
+
+                        shuffle_text = " 🔀 shuffled" if shuffle_enabled else ""
+
+                        await self.send_message(
+                                room.room_id,
+                                f"🎵 Added folder `{target.name}` ({len(files)} tracks){shuffle_text}",
+                        )
+                        return
+
+                # ─────────────────────────────────────
+                # CASE 2: single file
+                # ─────────────────────────────────────
+                if not target.is_file():
+                        await self.send_message(room.room_id, "❌ Not a valid file")
+                        return
+
+                if not await self._join_call_for_room(room.room_id):
+                        return
+
+                async with self._playback_lock:
+                        had_current = (
+                                self.audio_queue.current is not None
+                                or self.call_worker.state == "playing"
+                        )
+
+                        duration = self.audio_queue.get_audio_duration(str(target))
+
+                        self.audio_queue.add_to_queue(
+                                str(target),
+                                title=target.stem,
+                                duration=duration,
+                                source_url=f"local:{target.relative_to(music_dir)}",
+                                non_cacheable=True,
+                        )
+
+                        if not had_current:
+                                await self._advance_queue(room.room_id, force_next=True)
+
+                await self.send_message(
+                        room.room_id,
+                        f"🎵 Added `{target.name}`",
+                )
+                return
 
         if command == "!queue":
             if not self.audio_queue.queue and not self.audio_queue.current:
