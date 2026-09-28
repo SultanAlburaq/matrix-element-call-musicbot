@@ -146,7 +146,9 @@ const logStream = fs.createWriteStream(logFilePath, { flags: "a" });
 
 function logLine(message) {
     const ts = new Date().toISOString();
-    logStream.write(`[${ts}] ${message}\n`);
+    const formatted = `[${ts}] ${message}`;
+    logStream.write(`${formatted}\n`);
+    process.stderr.write(`${formatted}\n`);
 }
 
 function emit(event) {
@@ -274,6 +276,7 @@ async function fetchWhoAmI(baseUrl, accessToken) {
     }
     return response.json();
 }
+
 
 async function fetchJson(url) {
     const response = await fetch(url);
@@ -485,8 +488,9 @@ class CallWorker {
             );
         }
 
+        const roomOptions = { autoSubscribe: true, dynacast: true };
         const room = new Room();
-        await room.connect(config.url, config.jwt, { autoSubscribe: true, dynacast: true });
+        await room.connect(config.url, config.jwt, roomOptions);
         logLine(`livekit connected auth_mode=${config._auth_mode || "unknown"}`);
 
         this.audioSource = new AudioSource(SAMPLE_RATE, CHANNELS);
@@ -841,6 +845,33 @@ async function main() {
     });
     sessionManager.start();
 
+    // Clear any stale call memberships left by previous crashed sessions with different device IDs.
+    // m.call.member state keys: legacy = `_${userId}_${deviceId}`, matrix2 = `${userId}:${deviceId}`
+    try {
+        const roomState = room.currentState;
+        const staleKeys = [];
+        for (const evType of ["m.call.member", "org.matrix.msc3401.call.member"]) {
+            const stateMap = roomState.events.get(evType);
+            if (!stateMap) continue;
+            for (const [stateKey, stateEvent] of stateMap) {
+                const content = stateEvent.getContent();
+                const sender = stateEvent.getSender();
+                if (sender !== userId) continue;
+                // Skip if already empty/expired
+                if (!content || (Array.isArray(content.memberships) && content.memberships.length === 0)) continue;
+                // Skip if this is our current device (we'll overwrite it via joinRTCSession)
+                if (stateKey === `_${userId}_${deviceId}` || stateKey === `${userId}:${deviceId}`) continue;
+                staleKeys.push({ evType, stateKey });
+            }
+        }
+        for (const { evType, stateKey } of staleKeys) {
+            logLine(`clearing stale call membership state_key=${stateKey}`);
+            await client.sendStateEvent(roomId, evType, {}, stateKey);
+        }
+    } catch (err) {
+        logLine(`warning: ghost cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     const session = sessionManager.getRoomSession(room);
 
     let effectiveMembershipMode = membershipMode;
@@ -896,6 +927,7 @@ async function main() {
     });
 
     await worker.connectLivekit();
+
     emit({ event: "joined", roomId, mode: effectiveMembershipMode });
 
     const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
