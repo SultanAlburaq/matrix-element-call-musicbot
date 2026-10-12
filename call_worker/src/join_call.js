@@ -406,7 +406,8 @@ class CallWorker {
 
     setVolumePercent(value) {
         const normalizedPercent = normalizeVolumePercent(value);
-        this.targetVolumeGain = normalizedPercent / 100;
+		const dB = 60 * (normalizedPercent / 100 - 1);
+		this.targetVolumeGain = Math.pow(10, dB / 20);
         audioSettings.volumePercent = normalizedPercent;
         logLine(`volume target updated percent=${normalizedPercent} gain=${this.targetVolumeGain.toFixed(3)}`);
     }
