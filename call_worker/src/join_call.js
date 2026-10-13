@@ -856,6 +856,7 @@ async function main() {
     const memberId = `${userId}:${deviceId}`;
     const livekitTransport = {
         type: "livekit",
+        livekit_alias: roomId,
         livekit_service_url: livekitServiceUrl,
     };
 
